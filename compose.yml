@@ -1,0 +1,361 @@
+# ===================================================================================
+#                      DOCKER COMPOSE 终极维护与优化版
+# ===================================================================================
+# 常用命令：
+# 更新单个服务：   docker compose pull 服务名 && docker compose up -d 服务名
+# 强制重建服务：   docker compose up -d --force-recreate 服务名
+# 查看日志：       docker compose logs -f 服务名
+# 查看所有状态：   docker compose ps
+# 重启服务：       docker compose restart 服务名
+# 停止服务：       docker compose stop 服务名
+# 停止并删除容器： docker compose down 服务名
+# ===================================================================================
+
+version: '3.8'
+
+# ===================================================================================
+# 全局固定声明（放在最顶部，防止被误删）
+# ===================================================================================
+networks:
+  D_Home:
+    external: true
+
+volumes:
+  postgres_data:
+
+    # ===================================================================================
+    # 全局共享配置
+    # ===================================================================================
+x-defaults:
+  port-base: &default-port
+    host_ip: ${TS_HOST_IP}
+    protocol: tcp
+
+  # 基础配置锚点：重启策略 + 用户权限 + 日志限制
+  service-base: &service-base
+    restart: unless-stopped
+    user: "0:0"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # 网络配置锚点（单独拆出来，避免覆盖问题）
+  network-fixed-ip: &network-fixed-ip
+    D_Home: {}
+
+services:
+
+  # ===================================================================================
+  # 1. cloudflare (100)
+  # ===================================================================================
+  cloudflare:
+    container_name: cloudflare
+    image: cloudflare/cloudflared:latest
+    <<: *service-base
+    networks:
+      D_Home:
+        ipv4_address: ${SUBNET_PREFIX}.100
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # ===================================================================================
+  # 2. postgres (101) - 需要特殊用户权限
+  # ===================================================================================
+  postgres:
+    container_name: postgres
+    image: postgres:17
+    restart: unless-stopped
+    user: "999:999" # postgres 专用用户，不使用 0:0
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      D_Home:
+        ipv4_address: ${SUBNET_PREFIX}.101
+    environment:
+      - PGDATA=/var/lib/postgresql/data/pgdata
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    privileged: true
+    tty: true
+    stdin_open: true
+    volumes:
+      - './postgres/data:/var/lib/postgresql/data/pgdata'
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U postgres" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ===================================================================================
+  # 3. owu (102)
+  # ===================================================================================
+  owu:
+    container_name: owu
+    image: 'ghcr.io/open-webui/open-webui:main'
+    <<: *service-base
+    ports:
+      - target: 8086
+        published: 814
+        <<: *default-port
+    networks:
+      D_Home:
+        ipv4_address: ${SUBNET_PREFIX}.102
+    environment:
+      - DATABASE_URL=postgresql://${OPENWEBUI_DB_USER}:${OPENWEBUI_DB_PASSWORD}@postgres:5432/${OPENWEBUI_DB_NAME}
+      - DATABASE_POOL_SIZE=10
+      - DATABASE_POOL_MAX_OVERFLOW=20
+      - ENABLE_OLLAMA_API=false
+    volumes:
+      - './openwebui/data:/app/backend/data'
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ===================================================================================
+  # 4. cpa (103)
+  # ===================================================================================
+  cpa:
+    container_name: cpa
+    image: eceasy/cli-proxy-api:latest
+    <<: *service-base
+    ports:
+      - target: 8317
+        published: 820
+        <<: *default-port
+    networks:
+      D_Home:
+        ipv4_address: ${SUBNET_PREFIX}.103
+    volumes:
+      - ./cliproxyapi/config.yaml:/CLIProxyAPI/config.yaml
+      - ./cliproxyapi/auths:/root/.cli-proxy-api
+      - ./cliproxyapi/logs:/CLIProxyAPI/logs
+
+  # ===================================================================================
+  # 5. octopus (104)
+  # ===================================================================================
+  octopus:
+    container_name: octopus
+    image: ghcr.io/linbmv/octopus:latest
+    <<: *service-base
+    ports:
+      - target: 8080
+        published: 801
+        <<: *default-port
+    networks:
+      D_Home:
+        ipv4_address: ${SUBNET_PREFIX}.104
+    volumes:
+      - './octopus/data:/app/data'
+
+  # ===================================================================================
+  # 6. grok2api (105)
+  # ===================================================================================
+  grok2api:
+    container_name: grok2api
+    image: ghcr.io/jiujiu532/grok2api:latest
+    <<: *service-base
+    ports:
+      - target: 8000
+        published: 811
+        <<: *default-port
+    networks:
+      D_Home:
+        ipv4_address: ${SUBNET_PREFIX}.105
+    environment:
+      TZ: Asia/Shanghai
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SERVER_HOST: ${SERVER_HOST:-0.0.0.0}
+      SERVER_PORT: ${SERVER_PORT:-8000}
+      SERVER_WORKERS: ${SERVER_WORKERS:-1}
+      ACCOUNT_STORAGE: ${ACCOUNT_STORAGE:-local}
+      ACCOUNT_LOCAL_PATH: ${ACCOUNT_LOCAL_PATH:-data/accounts.db}
+    volumes:
+      - './grok2api/data:/app/data'
+
+  # ===================================================================================
+  # 7. trilium (110)
+  # ===================================================================================
+  trilium:
+    container_name: trilium
+    image: triliumnext/trilium:latest
+    <<: *service-base
+    ports:
+      - target: 8080
+        published: 812
+        <<: *default-port
+    networks:
+      D_Home:
+        ipv4_address: ${SUBNET_PREFIX}.110
+    environment:
+      - TRILIUM_DATA_DIR=/home/node/trilium-data
+      - TZ=Asia/Singapore
+    volumes:
+      - ./trilium/trilium-data:/home/node/trilium-data
+
+  # ===================================================================================
+  # 8. metube (111)
+  # ===================================================================================
+  metube:
+    container_name: metube
+    image: ghcr.io/alexta69/metube
+    <<: *service-base
+    ports:
+      - target: 8081
+        published: 813
+        <<: *default-port
+    networks:
+      D_Home:
+        ipv4_address: ${SUBNET_PREFIX}.111
+    volumes:
+      - ./metube/downloads:/downloads
+      - ./metube/cookies:/cookies
+    environment:
+      - YTDL_OPTIONS={"cookiefile":"/cookies/cookies.txt"}
+
+  # ===================================================================================
+  # 9. arialist (113)
+  # ===================================================================================
+  arialist:
+    container_name: arialist
+    image: 'xhofe/alist-aria2:v3.40.0'
+    <<: *service-base
+    ports:
+      - target: 5244
+        published: 815
+        <<: *default-port
+    networks:
+      D_Home:
+        ipv4_address: ${SUBNET_PREFIX}.113
+    environment:
+      - PUID=0
+      - PGID=0
+      - UMASK=022
+      - TZ=UTC
+    volumes:
+      - './arialist/alist:/opt/alist/data'
+      - '/root/data/dl:/downloads'
+      - '/root/data:/webdav'
+
+  # ===================================================================================
+  # 10. awcaio (114)
+  # ===================================================================================
+  awcaio:
+    container_name: awcaio
+    image: ghcr.io/linbmv/awcaio:release-unified
+    <<: *service-base
+    ports:
+      - target: 3001
+        published: 816
+        <<: *default-port
+    networks:
+      D_Home:
+        ipv4_address: ${SUBNET_PREFIX}.114
+    env_file:
+      - ./awcaio/.env
+    environment:
+      - NODE_ENV=production
+    volumes:
+      - ./awcaio/data:/app/data:rw
+      - ./awcaio/whatsapp_auth:/app/whatsapp_auth:rw
+      - ./awcaio/logs:/app/logs:rw
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://localhost:3001/api/whatsapp/status').then(r=>process\
+            .exit(r.ok?0:1)).catch(()=>process.exit(1))"
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # ===================================================================================
+  # 11. hca (115)
+  # ===================================================================================
+  hca:
+    container_name: hca
+    build: ./hcafamily
+    <<: *service-base
+    ports:
+      - target: 5000
+        published: 817
+        <<: *default-port
+    networks:
+      D_Home:
+        ipv4_address: ${SUBNET_PREFIX}.115
+    environment:
+      - ADMIN_PASSWORD=${HCA_ADMIN_PASSWORD}
+    volumes:
+      - ./hcafamily/media:/app/media
+      - ./hcafamily/metadata.json:/app/metadata.json
+
+  # ===================================================================================
+  # 12. microbin (116)
+  # ===================================================================================
+  microbin:
+    container_name: microbin
+    image: danielszabo99/microbin:latest
+    <<: *service-base
+    ports:
+      - target: 8080
+        published: 818
+        <<: *default-port
+    networks:
+      D_Home:
+        ipv4_address: ${SUBNET_PREFIX}.116
+    volumes:
+      - ./microbin/microbin-data:/app/microbin_data
+
+  # ===================================================================================
+  # 13. anylisten (117)
+  # ===================================================================================
+  anylisten:
+    container_name: anylisten
+    image: lyswhut/any-listen-web-server
+    <<: *service-base
+    ports:
+      - target: 9500
+        published: 819
+        <<: *default-port
+    networks:
+      D_Home:
+        ipv4_address: ${SUBNET_PREFIX}.117
+    volumes:
+      - './anylisten/data:/server/data'
+      - './anylisten/music:/music'
+
+# ===================================================================================
+#                          【新增服务纯净模板】
+# ===================================================================================
+# 使用方法：
+# 1. 直接复制下面从 `your-new-service:` 开始的全部内容
+# 2. 把 `your-new-service` 改成实际服务名
+# 3. 修改 image、端口、IP尾数即可
+# ===================================================================================
+
+#  your-new-service:
+#    container_name: your-new-service
+#    image: 镜像地址:tag
+#    <<: *service-base
+#    ports:
+#      - target: 8080
+#        published: 830
+#        <<: *default-port
+#    networks:
+#      D_Home:
+#        ipv4_address: ${SUBNET_PREFIX}.118

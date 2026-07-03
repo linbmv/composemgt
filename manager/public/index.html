@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Docker Compose 容器管理面板</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220%22 width=%22100%22 height=%22100%22><rect width=%22100%22 height=%22100%22 rx=%2220%22 fill=%22%232496ED%22/><path d=%22M20,35 h15 v15 h-15 z M40,35 h15 v15 h-15 z M60,35 h15 v15 h-15 z M30,55 h40 v15 h-40 z%22 fill=%22%23ffffff%22/></svg>">
+  <!-- Google Fonts Outfit & Inter -->
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Sidebar / Sidebar Navigation -->
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <svg class="brand-logo" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+          <path d="M12 11v6"></path>
+          <path d="M9 14h6"></path>
+        </svg>
+        <div class="brand-text">
+          <h1>ComposeMgt</h1>
+          <span>容器集群控制台</span>
+        </div>
+      </div>
+
+      <nav class="sidebar-nav">
+        <button class="nav-item active" data-tab="containers">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect><rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect><line x1="6" y1="6" x2="6.01" y2="6"></line><line x1="6" y1="18" x2="6.01" y2="18"></line></svg>
+          <span>容器管理</span>
+        </button>
+        <button class="nav-item" data-tab="env">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
+          <span>.env 环境变量</span>
+        </button>
+        <button class="nav-item" data-tab="terminal">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>
+          <span>Docker 终端命令行</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="system-status-widget">
+          <div class="status-indicator">
+            <span class="pulse-dot status-online"></span>
+            <span id="system-mode-text">连接中...</span>
+          </div>
+          <div class="system-meta">
+            <div><span class="meta-label">宿主 IP:</span> <span id="meta-host-ip">-</span></div>
+            <div><span class="meta-label">子网前缀:</span> <span id="meta-subnet">-</span></div>
+            <div><span class="meta-label">运行平台:</span> <span id="meta-platform">-</span></div>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main Content Area -->
+    <main class="main-content">
+      <!-- Top header bar -->
+      <header class="main-header">
+        <div class="header-title">
+          <h2 id="page-title">容器管理</h2>
+          <p id="page-subtitle">管理所有 Docker Compose 服务及容器状态</p>
+        </div>
+        <div class="header-actions">
+          <button id="btn-refresh" class="btn btn-secondary">
+            <svg class="icon-spin-hover" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+            刷新状态
+          </button>
+          <button id="btn-add-container" class="btn btn-primary">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+            新增服务
+          </button>
+        </div>
+      </header>
+
+      <!-- Alert Notification Banner -->
+      <div id="alert-banner" class="alert-banner hidden">
+        <span class="alert-message">提示信息</span>
+        <button class="alert-close">&times;</button>
+      </div>
+
+      <!-- Tab: Containers -->
+      <section id="tab-containers" class="tab-pane active">
+        <!-- Dashboard overview cards -->
+        <div class="stats-grid">
+          <div class="stat-card">
+            <div class="stat-icon bg-primary-soft">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+            </div>
+            <div class="stat-info">
+              <span class="stat-value" id="stat-total">0</span>
+              <span class="stat-label">总定义服务</span>
+            </div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon bg-success-soft">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"></polyline><polyline points="16 7 22 7 22 13"></polyline></svg>
+            </div>
+            <div class="stat-info">
+              <span class="stat-value text-success" id="stat-running">0</span>
+              <span class="stat-label">运行中容器</span>
+            </div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon bg-danger-soft">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
+            </div>
+            <div class="stat-info">
+              <span class="stat-value text-danger" id="stat-stopped">0</span>
+              <span class="stat-label">已停止服务</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Filter bar -->
+        <div class="filter-bar">
+          <div class="search-box">
+            <svg class="search-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+            <input type="text" id="search-input" placeholder="输入名称、镜像或IP过滤...">
+          </div>
+          <div class="filter-options">
+            <button class="filter-btn active" data-filter="all">全部</button>
+            <button class="filter-btn" data-filter="running">运行中</button>
+            <button class="filter-btn" data-filter="stopped">已停止</button>
+          </div>
+        </div>
+
+        <!-- Container Grid list -->
+        <div class="container-grid" id="container-list-grid">
+          <!-- Dynamically populated -->
+          <div class="loading-state">
+            <div class="spinner"></div>
+            <span>加载容器列表中...</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- Tab: Env -->
+      <section id="tab-env" class="tab-pane">
+        <div class="card env-editor-card">
+          <div class="card-header">
+            <h3>.env 本地环境变量配置文件</h3>
+            <div class="env-toggle">
+              <button class="toggle-btn active" id="env-mode-visual">可视化编辑</button>
+              <button class="toggle-btn" id="env-mode-raw">源码编辑</button>
+            </div>
+          </div>
+          <div class="card-body">
+            <!-- Visual mode env editor -->
+            <div id="env-visual-container" class="env-visual">
+              <div id="env-groups-container">
+                <!-- Dynamically populated grouped tables -->
+              </div>
+            </div>
+
+            <!-- Raw text editor mode -->
+            <div id="env-raw-container" class="env-raw hidden">
+              <textarea id="env-raw-textarea" spellcheck="false" placeholder="# 环境变量配置文件"></textarea>
+            </div>
+          </div>
+          <div class="card-footer">
+            <button id="btn-save-env" class="btn btn-primary">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>
+              保存配置
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Tab: Terminal Console -->
+      <section id="tab-terminal" class="tab-pane">
+        <div class="card terminal-card">
+          <div class="card-header">
+            <h3>Docker 交互式命令行控制台</h3>
+            <span class="text-muted text-sm">出于安全设计，仅允许运行以 <code>docker</code> 或 <code>docker compose</code> 开头的运维命令</span>
+          </div>
+          <div class="card-body">
+            <div class="quick-commands" style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:16px; align-items:center; width:100%;">
+              <span class="text-secondary text-sm" style="font-weight:600; margin-right:8px;">常用命令：</span>
+              <div id="quick-cmds-list" style="display:flex; flex-wrap:wrap; gap:8px;">
+                <!-- Populated dynamically -->
+              </div>
+              <button id="btn-manage-quick-cmds" class="btn btn-secondary btn-xs" style="margin-left:auto; display:flex; align-items:center; gap:4px;" title="管理常用命令">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+                自定义快捷命令
+              </button>
+            </div>
+            <div class="bg-terminal" style="border-radius: 8px; overflow: hidden; border: 1px solid var(--border-color);">
+              <pre class="terminal-output" id="terminal-console-output" style="height: 380px; overflow-y:auto; padding:20px; font-family:var(--font-mono); font-size:0.85rem; line-height:1.6; background-color:var(--terminal-bg); color:var(--terminal-text);">$ 等待输入指令...\n例如在下方输入: docker stats --no-stream</pre>
+            </div>
+            <form id="form-terminal-cmd" style="display:flex; gap:12px; margin-top:16px;">
+              <div class="ip-input-group" style="flex-grow:1; background-color: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 6px; overflow: hidden;">
+                <span class="ip-prefix-label" style="font-weight:700; color:var(--primary); padding:10px 12px; background-color: rgba(0, 0, 0, 0.2); border-right: 1px solid var(--border-color); font-family:var(--font-mono); font-size:0.9rem;">$</span>
+                <input type="text" id="terminal-cmd-input" placeholder="输入要执行的 docker 命令..." required style="font-family:var(--font-mono); border:none; outline:none; background:none; color:#ffffff; padding:10px 14px; flex-grow:1; font-size:0.9rem;">
+              </div>
+              <button type="submit" class="btn btn-primary">
+                执行指令
+              </button>
+            </form>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Modal: Add New Service -->
+  <div class="modal-backdrop" id="modal-add-service">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <h3>新增容器服务</h3>
+        <button class="modal-close-btn">&times;</button>
+      </div>
+      <form id="form-add-service">
+        <div class="modal-body">
+          <div class="form-grid">
+            <div class="form-group col-12">
+              <label for="srv-name" class="required">服务标识 (ID)</label>
+              <input type="text" id="srv-name" required placeholder="例如: qinglong, myapp (仅限小写英文和短横线)" pattern="[a-z0-9\-]+">
+              <span class="help-text">在 compose.yml 中作为服务 key，也将作为默认容器名。</span>
+            </div>
+
+            <div class="form-group col-12">
+              <label for="srv-image" class="required">Docker 镜像地址</label>
+              <input type="text" id="srv-image" required placeholder="例如: node:20-alpine, ghcr.io/username/repo:latest">
+            </div>
+
+            <div class="form-group col-6">
+              <label for="srv-pub-port">宿主机端口 (Published)</label>
+              <input type="number" id="srv-pub-port" placeholder="例如: 825" min="1" max="65535">
+              <span class="help-text">暴露在 Tailscale IP (${TS_HOST_IP}) 的端口</span>
+            </div>
+
+            <div class="form-group col-6">
+              <label for="srv-tgt-port">容器内端口 (Target)</label>
+              <input type="number" id="srv-tgt-port" placeholder="例如: 8080" min="1" max="65535">
+              <span class="help-text">容器内部监听端口</span>
+            </div>
+
+            <div class="form-group col-12">
+              <label for="srv-ip-suffix">子网固定 IP 尾数</label>
+              <div class="ip-input-group">
+                <span class="ip-prefix-label" id="ip-prefix-display">172.18.0.</span>
+                <input type="number" id="srv-ip-suffix" placeholder="118" min="2" max="254">
+              </div>
+              <span class="help-text">在自定义网络 D_Home 中分配的静态 IP 尾数</span>
+            </div>
+
+            <!-- Dynamic Fields: Env & Volumes -->
+            <div class="form-group col-12">
+              <label>挂载卷 (Volumes)</label>
+              <div id="volumes-list" class="dynamic-inputs">
+                <!-- Added dynamically -->
+              </div>
+              <button type="button" class="btn btn-secondary btn-xs btn-add-field" data-type="volume">
+                + 添加数据卷挂载
+              </button>
+            </div>
+
+            <div class="form-group col-12">
+              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 4px;">
+                <label style="margin-bottom:0;">环境变量 (Environment)</label>
+                <button type="button" class="btn btn-secondary btn-xs" id="btn-toggle-bulk-env" style="padding: 2px 8px;">
+                  💬 批量导入 (Vercel/JSON)
+                </button>
+              </div>
+              
+              <!-- Standard Line-by-Line List -->
+              <div id="env-list" class="dynamic-inputs">
+                <!-- Added dynamically -->
+              </div>
+              
+              <!-- Bulk Paste Textarea (Hidden by default) -->
+              <div id="env-bulk-container" class="hidden mt-2" style="display: flex; flex-direction: column; gap: 8px;">
+                <textarea id="env-bulk-textarea" placeholder="在此粘贴环境变量，支持以下格式：
+1. 键值对格式（KEY=VALUE，每行一个）
+2. Vercel 命令行拷贝格式
+3. JSON 对象格式 (如 {&quot;KEY&quot;: &quot;VALUE&quot;})" style="width: 100%; height: 120px; font-family: var(--font-mono); font-size: 0.85rem; padding: 10px; background: rgba(0,0,0,0.2); border: 1px solid var(--border-color); border-radius: 6px; outline: none; color: #ffffff; resize: vertical;"></textarea>
+                <div style="display: flex; gap: 8px; justify-content: flex-end;">
+                  <button type="button" class="btn btn-xs btn-secondary" id="btn-cancel-bulk-env">取消</button>
+                  <button type="button" class="btn btn-xs btn-primary" id="btn-parse-bulk-env">解析并导入</button>
+                </div>
+              </div>
+              
+              <button type="button" class="btn btn-secondary btn-xs btn-add-field" data-type="env" id="btn-add-env-single" style="margin-top: 8px;">
+                + 添加环境变量
+              </button>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary modal-cancel-btn">取消</button>
+          <button type="submit" class="btn btn-primary">提交创建</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Modal: View Logs -->
+  <div class="modal-backdrop modal-lg" id="modal-logs">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <h3 id="logs-title">容器实时日志 - service</h3>
+        <div class="logs-header-actions">
+          <button id="btn-refresh-logs" class="btn btn-secondary btn-xs">
+            刷新日志
+          </button>
+          <button class="modal-close-btn">&times;</button>
+        </div>
+      </div>
+      <div class="modal-body bg-terminal">
+        <pre class="terminal-output" id="logs-output">加载日志中...</pre>
+      </div>
+      <div class="modal-footer">
+        <span class="terminal-info">仅显示最近 100 行日志</span>
+        <button type="button" class="btn btn-secondary modal-cancel-btn">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Delete Confirmation -->
+  <div class="modal-backdrop" id="modal-delete-confirm">
+    <div class="modal-dialog modal-sm">
+      <div class="modal-header">
+        <h3 class="text-danger">确认删除服务？</h3>
+        <button class="modal-close-btn">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p>您确定要从 <code>compose.yml</code> 中删除服务 <strong id="delete-service-name" class="text-white">service</strong> 吗？</p>
+        <p class="text-muted text-sm mt-2">注意：此操作将停止并删除该服务的容器，但不会删除您挂载在宿主机的持久化数据目录。</p>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary modal-cancel-btn">取消</button>
+        <button type="button" id="btn-confirm-delete" class="btn btn-danger">确认删除</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Manage Custom Commands -->
+  <div class="modal-backdrop modal-lg" id="modal-custom-commands">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <h3>管理常用 Docker 命令快捷键</h3>
+        <button class="modal-close-btn">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="table-responsive">
+          <table class="env-table" style="width: 100%;">
+            <thead>
+              <tr>
+                <th width="200">按钮名称 (如: 状态监控)</th>
+                <th>命令内容 (以 docker 或 docker compose 开头)</th>
+                <th width="80">操作</th>
+              </tr>
+            </thead>
+            <tbody id="custom-cmds-tbody">
+              <!-- Populated dynamically -->
+            </tbody>
+          </table>
+        </div>
+        <button id="btn-add-cmd-row" class="btn btn-secondary btn-sm mt-3">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+          新增一行命令
+        </button>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary modal-cancel-btn">取消</button>
+        <button type="button" id="btn-save-custom-cmds" class="btn btn-primary">保存修改</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

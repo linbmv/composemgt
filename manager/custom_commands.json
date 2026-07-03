@@ -1,0 +1,30 @@
+[
+  {
+    "name": "状态监控 (stats)",
+    "cmd": "docker stats --no-stream"
+  },
+  {
+    "name": "磁盘占用 (df)",
+    "cmd": "docker system df"
+  },
+  {
+    "name": "镜像列表 (images)",
+    "cmd": "docker images"
+  },
+  {
+    "name": "数据卷列表 (volume ls)",
+    "cmd": "docker volume ls"
+  },
+  {
+    "name": "网络列表 (network ls)",
+    "cmd": "docker network ls"
+  },
+  {
+    "name": "Compose 状态 (ps -a)",
+    "cmd": "docker compose ps -a"
+  },
+  {
+    "name": "Clean Cache (prune)",
+    "cmd": "docker system prune -f"
+  }
+]
