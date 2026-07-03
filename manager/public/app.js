@@ -254,6 +254,13 @@ function setupEventListeners() {
       const cmd = terminalCmdInput.value.trim();
       if (!cmd) return;
 
+      // Intercept local clear commands
+      if (cmd.toLowerCase() === 'clear' || cmd.toLowerCase() === 'cls') {
+        terminalConsoleOutput.textContent = '$ 等待输入指令...\n例如在下方输入: docker stats --no-stream';
+        terminalCmdInput.value = '';
+        return;
+      }
+
       terminalConsoleOutput.textContent += `\n\n$ ${cmd}\n正在执行...\n`;
       terminalConsoleOutput.scrollTop = terminalConsoleOutput.scrollHeight;
 
@@ -279,6 +286,15 @@ function setupEventListeners() {
 
       terminalCmdInput.value = '';
       terminalConsoleOutput.scrollTop = terminalConsoleOutput.scrollHeight;
+    });
+  }
+
+  const btnClearTerminal = document.getElementById('btn-clear-terminal');
+  if (btnClearTerminal) {
+    btnClearTerminal.addEventListener('click', () => {
+      if (terminalConsoleOutput) {
+        terminalConsoleOutput.textContent = '$ 等待输入指令...\n例如在下方输入: docker stats --no-stream';
+      }
     });
   }
 
@@ -916,9 +932,10 @@ function renderCustomCommands() {
     // Bind click event dynamically
     btn.addEventListener('click', () => {
       const input = document.getElementById('terminal-cmd-input');
-      if (input) {
+      const form = document.getElementById('form-terminal-cmd');
+      if (input && form) {
         input.value = cmdObj.cmd;
-        input.focus();
+        form.dispatchEvent(new Event('submit'));
       }
     });
     

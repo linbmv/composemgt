@@ -172,9 +172,14 @@
       <!-- Tab: Terminal Console -->
       <section id="tab-terminal" class="tab-pane">
         <div class="card terminal-card">
-          <div class="card-header">
-            <h3>Docker 交互式命令行控制台</h3>
-            <span class="text-muted text-sm">出于安全设计，仅允许运行以 <code>docker</code> 或 <code>docker compose</code> 开头的运维命令</span>
+          <div class="card-header" style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
+            <div style="display: flex; flex-direction: column; gap: 4px;">
+              <h3>Docker 交互式命令行控制台</h3>
+              <span class="text-muted text-sm">出于安全设计，仅允许运行以 <code>docker</code> 或 <code>docker compose</code> 开头的运维命令</span>
+            </div>
+            <button id="btn-clear-terminal" class="btn btn-secondary btn-sm" style="padding: 6px 12px; display: flex; align-items: center; gap: 6px;">
+              🗑️ 清屏
+            </button>
           </div>
           <div class="card-body">
             <div class="quick-commands" style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:16px; align-items:center; width:100%;">
@@ -188,7 +193,8 @@
               </button>
             </div>
             <div class="bg-terminal" style="border-radius: 8px; overflow: hidden; border: 1px solid var(--border-color);">
-              <pre class="terminal-output" id="terminal-console-output" style="height: 380px; overflow-y:auto; padding:20px; font-family:var(--font-mono); font-size:0.85rem; line-height:1.6; background-color:var(--terminal-bg); color:var(--terminal-text);">$ 等待输入指令...\n例如在下方输入: docker stats --no-stream</pre>
+              <pre class="terminal-output" id="terminal-console-output" style="height: 380px; overflow: auto; padding:20px; font-family:var(--font-mono); font-size:0.8rem; line-height:1.6; background-color:var(--terminal-bg); color:var(--terminal-text); white-space: pre; word-wrap: normal;">$ 等待输入指令...
+例如在下方输入: docker stats --no-stream</pre>
             </div>
             <form id="form-terminal-cmd" style="display:flex; gap:12px; margin-top:16px;">
               <div class="ip-input-group" style="flex-grow:1; background-color: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 6px; overflow: hidden;">
