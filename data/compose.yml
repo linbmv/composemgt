@@ -92,31 +92,6 @@ services:
       retries: 5
 
   # ===================================================================================
-  # 3. owu (102)
-  # ===================================================================================
-  owu:
-    container_name: owu
-    image: 'ghcr.io/open-webui/open-webui:main'
-    <<: *service-base
-    ports:
-      - target: 8086
-        published: 814
-        <<: *default-port
-    networks:
-      D_Home:
-        ipv4_address: ${SUBNET_PREFIX}.102
-    environment:
-      - DATABASE_URL=postgresql://${OPENWEBUI_DB_USER}:${OPENWEBUI_DB_PASSWORD}@postgres:5432/${OPENWEBUI_DB_NAME}
-      - DATABASE_POOL_SIZE=10
-      - DATABASE_POOL_MAX_OVERFLOW=20
-      - ENABLE_OLLAMA_API=false
-    volumes:
-      - './openwebui/data:/app/backend/data'
-    depends_on:
-      postgres:
-        condition: service_healthy
-
-  # ===================================================================================
   # 4. cpa (103)
   # ===================================================================================
   cpa:

@@ -13,8 +13,8 @@ app.use(express.json());
 // Serve static frontend files from 'public' directory
 app.use(express.static(path.join(__dirname, 'public')));
 
-const COMPOSE_FILE_PATH = path.resolve(__dirname, '../compose.yml');
-const ENV_FILE_PATH = path.resolve(__dirname, '../.env');
+const COMPOSE_FILE_PATH = path.resolve(__dirname, '../data/compose.yml');
+const ENV_FILE_PATH = path.resolve(__dirname, '../data/.env');
 
 // Mock Mode Status (Enables mock mode if Docker is not available in system)
 let isMockMode = false;
@@ -58,7 +58,7 @@ function saveEnvVariables(envObj) {
 // Run exec command wrapped in Promise
 function runCommand(command) {
   return new Promise((resolve, reject) => {
-    exec(command, { cwd: path.resolve(__dirname, '..') }, (error, stdout, stderr) => {
+    exec(command, { cwd: path.resolve(__dirname, '../data') }, (error, stdout, stderr) => {
       if (error) {
         reject(error.message + '\n' + stderr);
       } else {
@@ -399,7 +399,7 @@ app.get('/api/services/:name/logs/stream', (req, res) => {
   // Real Mode: Spawn "docker compose logs -f --tail=100 name"
   console.log(`Streaming live logs for: ${name}`);
   const logProcess = spawn('docker', ['compose', 'logs', '-f', '--tail=100', name], {
-    cwd: path.resolve(__dirname, '..')
+    cwd: path.resolve(__dirname, '../data')
   });
 
   const sendLines = (text) => {

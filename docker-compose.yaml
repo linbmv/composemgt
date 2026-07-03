@@ -1,0 +1,28 @@
+# ===================================================================================
+#           ComposeMgt - Docker Compose 容器集群管理面板 部署配置文件
+# ===================================================================================
+version: '3.8'
+
+services:
+  composemgt:
+    build:
+      context: ./manager
+      dockerfile: Dockerfile
+    container_name: compose-mgt-dashboard
+    restart: always
+    ports:
+      - "9988:9988"
+    volumes:
+      # 1. 挂载宿主机 Docker Socket 以便管理容器生命周期
+      - /var/run/docker.sock:/var/run/docker.sock
+      # 2. 挂载 data 目录，使管理端能够读取与写入 data/compose.yml 和 data/.env
+      - ./data:/app/data
+    environment:
+      - PORT=9988
+      - NODE_ENV=production
+      - TZ=Asia/Shanghai
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
