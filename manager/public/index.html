@@ -367,11 +367,28 @@
 
             <!-- Dynamic Fields: Env & Volumes -->
             <div class="form-group col-12">
-              <label>挂载卷 (Volumes)</label>
+              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 4px;">
+                <label style="margin-bottom:0;">挂载卷 (Volumes)</label>
+                <button type="button" class="btn btn-secondary btn-xs" id="btn-toggle-bulk-volume" style="padding: 2px 8px;">
+                  💬 批量导入 (挂载卷)
+                </button>
+              </div>
               <div id="volumes-list" class="dynamic-inputs">
                 <!-- Added dynamically -->
               </div>
-              <button type="button" class="btn btn-secondary btn-xs btn-add-field" data-type="volume">
+              
+              <!-- Bulk Paste Volumes Textarea (Hidden by default) -->
+              <div id="volume-bulk-container" class="hidden mt-2" style="display: flex; flex-direction: column; gap: 8px;">
+                <textarea id="volume-bulk-textarea" placeholder="在此粘贴挂载卷，支持以下格式：
+1. 冒号分隔（/host/path:/container/path，每行一个）
+2. YAML 数组格式（- /host/path:/container/path，每行一个）" style="width: 100%; height: 120px; font-family: var(--font-mono); font-size: 0.85rem; padding: 10px; background: rgba(0,0,0,0.2); border: 1px solid var(--border-color); border-radius: 6px; outline: none; color: #ffffff; resize: vertical;"></textarea>
+                <div style="display: flex; gap: 8px; justify-content: flex-end;">
+                  <button type="button" class="btn btn-xs btn-secondary" id="btn-cancel-bulk-volume">取消</button>
+                  <button type="button" class="btn btn-xs btn-primary" id="btn-parse-bulk-volume">解析并导入</button>
+                </div>
+              </div>
+
+              <button type="button" class="btn btn-secondary btn-xs btn-add-field" data-type="volume" id="btn-add-volume-single" style="margin-top: 8px;">
                 + 添加数据卷挂载
               </button>
             </div>

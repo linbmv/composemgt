@@ -445,8 +445,55 @@ app.post('/api/services', async (req, res) => {
     const fileContent = fs.readFileSync(COMPOSE_FILE_PATH, 'utf8');
     const doc = YAML.parseDocument(fileContent);
 
-    if (doc.getIn(['services', name])) {
-      return res.status(400).json({ error: `Service "${name}" already exists.` });
+    const services = doc.get('services')?.toJSON() || {};
+    if (services[name]) {
+      return res.status(400).json({ error: `服务 ID "${name}" 已经存在。` });
+    }
+
+    // Check port conflict
+    if (publishedPort) {
+      const pubPortInt = parseInt(publishedPort);
+      for (const [srvName, srvConfig] of Object.entries(services)) {
+        if (srvName === name) continue;
+        if (Array.isArray(srvConfig.ports)) {
+          for (const p of srvConfig.ports) {
+            let srvPubPort = null;
+            if (typeof p === 'object' && p !== null) {
+              srvPubPort = p.published;
+            } else if (typeof p === 'string') {
+              const parts = p.split(':');
+              if (parts.length >= 2) {
+                // Format could be "hostIp:hostPort:containerPort" or "hostPort:containerPort"
+                srvPubPort = parseInt(parts[parts.length - 2]);
+              } else if (parts.length === 1) {
+                srvPubPort = parseInt(parts[0]);
+              }
+            }
+            if (srvPubPort !== null && parseInt(srvPubPort) === pubPortInt) {
+              return res.status(400).json({ error: `端口 ${pubPortInt} 已被现有服务 "${srvName}" 占用，请更换端口。` });
+            }
+          }
+        }
+      }
+    }
+
+    // Check IP suffix conflict
+    if (ipSuffix) {
+      const ipSuffixStr = ipSuffix.toString().trim();
+      for (const [srvName, srvConfig] of Object.entries(services)) {
+        if (srvName === name) continue;
+        const networks = srvConfig.networks || {};
+        for (const netConfig of Object.values(networks)) {
+          if (netConfig && netConfig.ipv4_address) {
+            const addr = netConfig.ipv4_address.toString();
+            const parts = addr.split('.');
+            const lastPart = parts[parts.length - 1].replace(/\}?$/, '').trim(); // Remove optional } from ${SUBNET_PREFIX}.118
+            if (lastPart === ipSuffixStr) {
+              return res.status(400).json({ error: `子网 IP 尾数 .${ipSuffixStr} 已被现有服务 "${srvName}" 占用，请更换 IP。` });
+            }
+          }
+        }
+      }
     }
 
     // Build the new service structure

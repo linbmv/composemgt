@@ -878,6 +878,13 @@ button, input, select, textarea {
   overflow: hidden;
 }
 
+.modal-dialog form {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  flex-grow: 1;
+}
+
 .modal-backdrop.open .modal-dialog {
   transform: scale(1);
 }

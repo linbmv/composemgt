@@ -211,6 +211,58 @@ function setupEventListeners() {
     });
   }
 
+  // Bulk Volume import listeners
+  const btnToggleBulkVolume = document.getElementById('btn-toggle-bulk-volume');
+  const btnCancelBulkVolume = document.getElementById('btn-cancel-bulk-volume');
+  const btnParseBulkVolume = document.getElementById('btn-parse-bulk-volume');
+  const volumeBulkContainer = document.getElementById('volume-bulk-container');
+  const volumeBulkTextarea = document.getElementById('volume-bulk-textarea');
+  const btnAddVolumeSingle = document.getElementById('btn-add-volume-single');
+
+  if (btnToggleBulkVolume) {
+    btnToggleBulkVolume.addEventListener('click', () => {
+      volumesList.classList.add('hidden');
+      btnAddVolumeSingle.classList.add('hidden');
+      btnToggleBulkVolume.classList.add('hidden');
+      volumeBulkContainer.classList.remove('hidden');
+      volumeBulkTextarea.focus();
+    });
+  }
+
+  if (btnCancelBulkVolume) {
+    btnCancelBulkVolume.addEventListener('click', () => {
+      volumeBulkContainer.classList.add('hidden');
+      volumesList.classList.remove('hidden');
+      btnAddVolumeSingle.classList.remove('hidden');
+      btnToggleBulkVolume.classList.remove('hidden');
+      volumeBulkTextarea.value = '';
+    });
+  }
+
+  if (btnParseBulkVolume) {
+    btnParseBulkVolume.addEventListener('click', () => {
+      const text = volumeBulkTextarea.value;
+      const parsedList = parseBulkVolumes(text);
+      
+      if (parsedList.length === 0) {
+        showAlert('未能解析出有效的挂载卷，请检查格式！', 'error');
+        return;
+      }
+      
+      parsedList.forEach(item => {
+        addVolumeRow(item.host, item.container);
+      });
+      
+      showAlert(`成功导入 ${parsedList.length} 个数据卷挂载！`);
+      
+      volumeBulkContainer.classList.add('hidden');
+      volumesList.classList.remove('hidden');
+      btnAddVolumeSingle.classList.remove('hidden');
+      btnToggleBulkVolume.classList.remove('hidden');
+      volumeBulkTextarea.value = '';
+    });
+  }
+
   // Submit Add Service Form
   formAddService.addEventListener('submit', handleAddServiceSubmit);
 
@@ -1086,6 +1138,36 @@ function parseBulkEnv(text) {
     }
   });
 
+  return result;
+}
+
+function parseBulkVolumes(text) {
+  const result = [];
+  const lines = text.split('\n');
+  lines.forEach(line => {
+    let trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) return;
+    
+    if (trimmed.startsWith('-')) {
+      trimmed = trimmed.substring(1).trim();
+    }
+    
+    trimmed = trimmed.replace(/^["']|["']$/g, '').trim();
+    
+    const lastColonIdx = trimmed.lastIndexOf(':');
+    if (lastColonIdx === -1) {
+      if (trimmed) {
+        result.push({ host: trimmed, container: '' });
+      }
+      return;
+    }
+    
+    const host = trimmed.substring(0, lastColonIdx).trim();
+    const container = trimmed.substring(lastColonIdx + 1).trim();
+    if (host || container) {
+      result.push({ host, container });
+    }
+  });
   return result;
 }
 
