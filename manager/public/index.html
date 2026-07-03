@@ -38,6 +38,10 @@
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>
           <span>Docker 终端命令行</span>
         </button>
+        <button class="nav-item" data-tab="settings">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+          <span>备份与设置</span>
+        </button>
       </nav>
 
       <div class="sidebar-footer">
@@ -205,6 +209,114 @@
                 执行指令
               </button>
             </form>
+          </div>
+        </div>
+      </section>
+
+      <!-- Tab: Settings & Backup -->
+      <section id="tab-settings" class="tab-pane">
+        <div class="form-grid">
+          <!-- Local Backup Card -->
+          <div class="col-6 card" style="display: flex; flex-direction: column;">
+            <div class="card-header">
+              <h3>本地导入与导出</h3>
+              <span class="text-muted text-sm">备份您的 compose.yml、.env 和自定义命令</span>
+            </div>
+            <div class="card-body" style="flex-grow: 1; display: flex; flex-direction: column; gap: 20px;">
+              <p class="help-text">您可以导出当前的完整配置（包含 Compose 容器文件、环境变量配置和自定义命令）为单个 JSON 备份文件。在需要时，可以通过导入此文件直接恢复配置状态。</p>
+              
+              <div style="display: flex; gap: 12px; margin-top: auto;">
+                <button id="btn-export-backup" class="btn btn-primary" style="flex: 1; display: flex; align-items: center; justify-content: center; gap: 8px;">
+                  📤 导出备份文件
+                </button>
+                <label class="btn btn-secondary" style="flex: 1; text-align: center; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px;">
+                  📥 导入备份文件
+                  <input type="file" id="input-import-backup" accept=".json" style="display: none;">
+                </label>
+              </div>
+            </div>
+          </div>
+
+          <!-- WebDAV Backup Card -->
+          <div class="col-6 card">
+            <div class="card-header">
+              <h3>WebDAV 云端备份设置</h3>
+              <span class="text-muted text-sm">自动或手动将配置备份至 WebDAV 云盘</span>
+            </div>
+            <div class="card-body">
+              <form id="form-webdav-config" style="display: flex; flex-direction: column; gap: 16px;">
+                <div class="form-group">
+                  <label>WebDAV 服务器地址</label>
+                  <input type="url" id="webdav-url" placeholder="如: https://dav.jianguoyun.com/dav/" required style="width: 100%; padding: 10px 14px; background-color: rgba(255,255,255,0.03); border:1px solid var(--border-color); border-radius:6px; outline:none; color:#fff;">
+                  <span class="help-text">必须支持 HTTP Basic 认证，且以 / 结尾</span>
+                </div>
+                
+                <div style="display: flex; gap: 16px;">
+                  <div class="form-group" style="flex: 1;">
+                    <label>用户名</label>
+                    <input type="text" id="webdav-username" placeholder="WebDAV 登录用户名" required style="width: 100%; padding: 10px 14px; background-color: rgba(255,255,255,0.03); border:1px solid var(--border-color); border-radius:6px; outline:none; color:#fff;">
+                  </div>
+                  <div class="form-group" style="flex: 1;">
+                    <label>密码 / 应用密钥</label>
+                    <input type="password" id="webdav-password" placeholder="WebDAV 应用密钥" required style="width: 100%; padding: 10px 14px; background-color: rgba(255,255,255,0.03); border:1px solid var(--border-color); border-radius:6px; outline:none; color:#fff;">
+                  </div>
+                </div>
+
+                <div class="form-group">
+                  <label>备份保存目录</label>
+                  <input type="text" id="webdav-directory" placeholder="/composemgt_backups" required style="width: 100%; padding: 10px 14px; background-color: rgba(255,255,255,0.03); border:1px solid var(--border-color); border-radius:6px; outline:none; color:#fff;">
+                  <span class="help-text">WebDAV 服务端的文件夹路径，如果不存在会自动创建</span>
+                </div>
+
+                <div class="form-group" style="flex-direction: row; align-items: center; gap: 10px; margin-top: 8px;">
+                  <input type="checkbox" id="webdav-auto-backup" style="width: auto; cursor: pointer;">
+                  <label for="webdav-auto-backup" style="cursor: pointer; user-select: none;">开启每日凌晨 3:00 自动云端备份</label>
+                </div>
+
+                <div style="display: flex; gap: 12px; margin-top: 12px;">
+                  <button type="button" id="btn-webdav-test" class="btn btn-secondary" style="flex: 1;">
+                    ⚡ 测试连接
+                  </button>
+                  <button type="submit" class="btn btn-primary" style="flex: 1;">
+                    💾 保存配置并备份
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+
+          <!-- WebDAV History Card -->
+          <div class="col-12 card" style="margin-top: 24px; width: 100%;">
+            <div class="card-header" style="display: flex; justify-content: space-between; align-items: center;">
+              <div>
+                <h3>WebDAV 云端历史备份</h3>
+                <span class="text-muted text-sm">云端存储的备份列表，可选择一键拉取恢复</span>
+              </div>
+              <button id="btn-webdav-refresh" class="btn btn-secondary btn-sm" style="display: flex; align-items: center; gap: 6px;">
+                🔄 刷新列表
+              </button>
+            </div>
+            <div class="card-body" style="padding: 0;">
+              <div class="table-responsive">
+                <table class="env-table" style="margin-bottom: 0; width: 100%;">
+                  <thead>
+                    <tr>
+                      <th style="width: 45%;">备份文件名</th>
+                      <th style="width: 15%;">文件大小</th>
+                      <th style="width: 25%;">备份时间</th>
+                      <th style="width: 15%; text-align: right; padding-right: 24px;">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="webdav-backups-tbody">
+                    <tr>
+                      <td colspan="4" class="text-center text-muted" style="padding: 30px; text-align: center;">
+                        暂无云盘备份列表，请先配置并保存 WebDAV。
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
           </div>
         </div>
       </section>

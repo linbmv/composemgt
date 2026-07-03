@@ -107,6 +107,12 @@ function setupEventListeners() {
       pageTitle.textContent = 'Docker 交互终端';
       pageSubtitle.textContent = '执行自定义的 Docker 与 Docker Compose 运维指令';
       btnAddContainer.classList.add('hidden');
+    } else if (tabName === 'settings') {
+      pageTitle.textContent = '备份与系统设置';
+      pageSubtitle.textContent = '导入、导出配置或设置 WebDAV 云端自动备份';
+      btnAddContainer.classList.add('hidden');
+      loadWebDavConfig();
+      loadWebDavBackups();
     }
   });
 
@@ -1082,3 +1088,259 @@ function parseBulkEnv(text) {
 
   return result;
 }
+
+// ===================================================================================
+//                        Settings & WebDAV Backup Logic
+// ===================================================================================
+
+async function loadWebDavConfig() {
+  try {
+    const res = await fetch('/api/webdav/config');
+    if (!res.ok) throw new Error('Failed to load WebDAV config');
+    const config = await res.json();
+    
+    document.getElementById('webdav-url').value = config.url || '';
+    document.getElementById('webdav-username').value = config.username || '';
+    document.getElementById('webdav-password').value = config.password || '';
+    document.getElementById('webdav-directory').value = config.directory || '/composemgt_backups';
+    document.getElementById('webdav-auto-backup').checked = !!config.autoBackup;
+  } catch (err) {
+    console.error('loadWebDavConfig error:', err);
+  }
+}
+
+async function loadWebDavBackups() {
+  const tbody = document.getElementById('webdav-backups-tbody');
+  if (!tbody) return;
+  
+  tbody.innerHTML = `
+    <tr>
+      <td colspan="4" class="text-center text-muted" style="padding: 30px; text-align: center;">
+        <div class="spinner" style="margin: 0 auto 10px auto; width: 24px; height: 24px;"></div>
+        正在拉取云端备份列表...
+      </td>
+    </tr>
+  `;
+
+  try {
+    const res = await fetch('/api/webdav/backups');
+    if (!res.ok) throw new Error(await res.text());
+    const backups = await res.json();
+    
+    tbody.innerHTML = '';
+    if (backups.length === 0) {
+      tbody.innerHTML = `
+        <tr>
+          <td colspan="4" class="text-center text-muted" style="padding: 30px; text-align: center;">
+            云端文件夹中暂无任何备份文件。
+          </td>
+        </tr>
+      `;
+      return;
+    }
+
+    backups.forEach(b => {
+      const tr = document.createElement('tr');
+      const formattedSize = (b.size / 1024).toFixed(2) + ' KB';
+      const formattedDate = new Date(b.date).toLocaleString();
+      
+      tr.innerHTML = `
+        <td style="font-family: var(--font-mono); font-size: 0.85rem;">${b.filename}</td>
+        <td>${formattedSize}</td>
+        <td>${formattedDate}</td>
+        <td style="text-align: right; padding-right: 24px;">
+          <button class="btn btn-secondary btn-xs btn-restore-webdav" data-filename="${b.filename}" style="background-color: var(--primary-soft); color: var(--primary); border-color: rgba(36,150,237,0.2); padding: 4px 8px;">
+            恢复配置
+          </button>
+        </td>
+      `;
+      
+      // Bind restore event
+      tr.querySelector('.btn-restore-webdav').addEventListener('click', () => {
+        handleWebDavRestore(b.filename);
+      });
+
+      tbody.appendChild(tr);
+    });
+  } catch (err) {
+    tbody.innerHTML = `
+      <tr>
+        <td colspan="4" class="text-center text-danger" style="padding: 30px; text-align: center;">
+          拉取备份列表失败: ${err.message || '请先确认 WebDAV 已正确配置并保存'}
+        </td>
+      </tr>
+    `;
+  }
+}
+
+async function handleWebDavRestore(filename) {
+  if (!confirm(`⚠️ 确定要从云端备份 [${filename}] 恢复配置吗？这将会覆盖您本地现有的 compose.yml、.env 和自定义命令配置！`)) {
+    return;
+  }
+
+  try {
+    const res = await fetch('/api/webdav/restore', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filename })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+
+    showAlert('🎉 成功从 WebDAV 恢复配置！正在重新加载系统数据...');
+    
+    // Reload local dashboard states
+    await loadSystemStatus();
+    loadServices();
+  } catch (err) {
+    showAlert(`恢复配置失败: ${err.message}`, 'error');
+  }
+}
+
+// Bind Settings tab event listeners
+document.addEventListener('DOMContentLoaded', () => {
+  const btnExportBackup = document.getElementById('btn-export-backup');
+  const inputImportBackup = document.getElementById('input-import-backup');
+  const btnWebDavTest = document.getElementById('btn-webdav-test');
+  const formWebDavConfig = document.getElementById('form-webdav-config');
+  const btnWebDavRefresh = document.getElementById('btn-webdav-refresh');
+
+  if (btnExportBackup) {
+    btnExportBackup.addEventListener('click', async () => {
+      try {
+        const res = await fetch('/api/backup/export');
+        if (!res.ok) throw new Error('导出失败');
+        const data = await res.json();
+        
+        // Trigger file download in browser
+        const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+        const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(data, null, 2));
+        const downloadAnchor = document.createElement('a');
+        downloadAnchor.setAttribute("href", dataStr);
+        downloadAnchor.setAttribute("download", `composemgt_backup_${dateStr}.json`);
+        document.body.appendChild(downloadAnchor);
+        downloadAnchor.click();
+        downloadAnchor.remove();
+        showAlert('备份文件已成功导出并下载！');
+      } catch (err) {
+        showAlert(`导出备份失败: ${err.message}`, 'error');
+      }
+    });
+  }
+
+  if (inputImportBackup) {
+    inputImportBackup.addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = async (event) => {
+        try {
+          const payload = JSON.parse(event.target.result);
+          if (!payload.compose || !payload.env) {
+            throw new Error('无效的备份文件结构！必须包含 compose 与 env。');
+          }
+
+          if (!confirm('⚠️ 警告：确定要导入该备份配置吗？这将会覆盖您本地现有的所有 compose.yml、.env 以及自定义快捷命令！')) {
+            inputImportBackup.value = '';
+            return;
+          }
+
+          const res = await fetch('/api/backup/import', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error);
+
+          showAlert('🎉 配置成功导入并已全部应用！');
+          inputImportBackup.value = '';
+          
+          // Reload
+          await loadSystemStatus();
+          loadServices();
+        } catch (err) {
+          showAlert(`导入备份失败: ${err.message}`, 'error');
+          inputImportBackup.value = '';
+        }
+      };
+      reader.readAsText(file);
+    });
+  }
+
+  if (btnWebDavTest) {
+    btnWebDavTest.addEventListener('click', async () => {
+      const url = document.getElementById('webdav-url').value.trim();
+      const username = document.getElementById('webdav-username').value.trim();
+      const password = document.getElementById('webdav-password').value.trim();
+      const directory = document.getElementById('webdav-directory').value.trim();
+
+      if (!url || !username || !password || !directory) {
+        showAlert('请先填满所有的 WebDAV 配置项后再进行测试！', 'error');
+        return;
+      }
+
+      btnWebDavTest.disabled = true;
+      btnWebDavTest.textContent = '⚡ 正在连接...';
+
+      try {
+        const res = await fetch('/api/webdav/test', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url, username, password, directory })
+        });
+        const data = await res.json();
+        
+        if (!res.ok) throw new Error(data.error);
+        showAlert('✅ WebDAV 连接测试成功，且备份目录状态正常！');
+      } catch (err) {
+        showAlert(`WebDAV 连接失败: ${err.message}`, 'error');
+      } finally {
+        btnWebDavTest.disabled = false;
+        btnWebDavTest.textContent = '⚡ 测试连接';
+      }
+    });
+  }
+
+  if (formWebDavConfig) {
+    formWebDavConfig.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      
+      const url = document.getElementById('webdav-url').value.trim();
+      const username = document.getElementById('webdav-username').value.trim();
+      const password = document.getElementById('webdav-password').value.trim();
+      const directory = document.getElementById('webdav-directory').value.trim();
+      const autoBackup = document.getElementById('webdav-auto-backup').checked;
+
+      try {
+        // Save Config
+        const saveRes = await fetch('/api/webdav/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url, username, password, directory, autoBackup })
+        });
+        const saveData = await saveRes.json();
+        if (!saveRes.ok) throw new Error(saveData.error);
+
+        showAlert('💾 WebDAV 配置已成功保存！正在触发即时备份...');
+
+        // Trigger Backup
+        const backupRes = await fetch('/api/webdav/backup', { method: 'POST' });
+        const backupData = await backupRes.json();
+        if (!backupRes.ok) throw new Error(backupData.error);
+
+        showAlert('🎉 WebDAV 云端备份完成！备份列表已更新。');
+        loadWebDavBackups();
+      } catch (err) {
+        showAlert(`保存或备份失败: ${err.message}`, 'error');
+      }
+    });
+  }
+
+  if (btnWebDavRefresh) {
+    btnWebDavRefresh.addEventListener('click', () => {
+      loadWebDavBackups();
+    });
+  }
+});

@@ -803,6 +803,306 @@ app.post('/api/terminal/commands', (req, res) => {
   }
 });
 
+const WEBDAV_CONFIG_PATH = path.resolve(__dirname, 'webdav_config.json');
+
+function getWebDavConfig() {
+  if (!fs.existsSync(WEBDAV_CONFIG_PATH)) {
+    return { url: '', username: '', password: '', directory: '/composemgt_backups', autoBackup: false };
+  }
+  try {
+    return JSON.parse(fs.readFileSync(WEBDAV_CONFIG_PATH, 'utf8'));
+  } catch (e) {
+    return { url: '', username: '', password: '', directory: '/composemgt_backups', autoBackup: false };
+  }
+}
+
+function buildBackupPayload() {
+  const compose = fs.existsSync(COMPOSE_FILE_PATH) ? fs.readFileSync(COMPOSE_FILE_PATH, 'utf8') : '';
+  const env = fs.existsSync(ENV_FILE_PATH) ? fs.readFileSync(ENV_FILE_PATH, 'utf8') : '';
+  let custom_commands = DEFAULT_COMMANDS;
+  if (fs.existsSync(CUSTOM_CMDS_PATH)) {
+    try {
+      custom_commands = JSON.parse(fs.readFileSync(CUSTOM_CMDS_PATH, 'utf8'));
+    } catch (e) {}
+  }
+  return {
+    version: '1.0.0',
+    timestamp: new Date().toISOString(),
+    compose,
+    env,
+    custom_commands
+  };
+}
+
+async function webdavRequest(config, method, subPath = '', headers = {}, body = null) {
+  let url = config.url;
+  if (!url.endsWith('/')) url += '/';
+  
+  let dir = config.directory.replace(/^\/+|\/+$/g, '');
+  let fullUrl = url;
+  if (dir) {
+    fullUrl += dir + '/';
+  }
+  if (subPath) {
+    fullUrl += subPath.replace(/^\/+/, '');
+  }
+
+  const authHeader = 'Basic ' + Buffer.from(config.username + ':' + config.password).toString('base64');
+  
+  const options = {
+    method,
+    headers: {
+      'Authorization': authHeader,
+      ...headers
+    }
+  };
+  if (body !== null) {
+    options.body = body;
+  }
+
+  const res = await fetch(fullUrl, options);
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`WebDAV 响应状态 ${res.status}: ${text || res.statusText}`);
+  }
+  return res;
+}
+
+async function ensureDirectoryExists(config) {
+  let url = config.url;
+  if (!url.endsWith('/')) url += '/';
+  let dir = config.directory.replace(/^\/+|\/+$/g, '');
+  if (!dir) return;
+
+  const authHeader = 'Basic ' + Buffer.from(config.username + ':' + config.password).toString('base64');
+  const fullUrl = url + dir + '/';
+  
+  try {
+    const checkRes = await fetch(fullUrl, {
+      method: 'PROPFIND',
+      headers: {
+        'Authorization': authHeader,
+        'Depth': '0'
+      }
+    });
+    if (checkRes.ok) {
+      return;
+    }
+  } catch (e) {}
+
+  const mkcolRes = await fetch(fullUrl, {
+    method: 'MKCOL',
+    headers: {
+      'Authorization': authHeader
+    }
+  });
+  if (!mkcolRes.ok && mkcolRes.status !== 405 && mkcolRes.status !== 409) {
+    const text = await mkcolRes.text();
+    throw new Error(`创建备份目录失败: ${mkcolRes.statusText} (${text})`);
+  }
+}
+
+async function executeWebDavBackup(config) {
+  await ensureDirectoryExists(config);
+  const payload = buildBackupPayload();
+  const dateStr = new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19);
+  const backupFilename = `composemgt_backup_${dateStr}.json`;
+  await webdavRequest(config, 'PUT', backupFilename, { 'Content-Type': 'application/json' }, JSON.stringify(payload, null, 2));
+  console.log(`☁️ Successfully backed up to WebDAV: ${backupFilename}`);
+}
+
+// 16. Local Export configuration
+app.get('/api/backup/export', (req, res) => {
+  try {
+    const payload = buildBackupPayload();
+    res.json(payload);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 17. Local Import configuration
+app.post('/api/backup/import', (req, res) => {
+  try {
+    const { compose, env, custom_commands } = req.body;
+    if (compose === undefined || env === undefined) {
+      return res.status(400).json({ error: '备份文件结构不完整，缺少 compose 或 env。' });
+    }
+
+    if (fs.existsSync(COMPOSE_FILE_PATH)) {
+      fs.writeFileSync(COMPOSE_FILE_PATH + '.bak', fs.readFileSync(COMPOSE_FILE_PATH));
+    }
+    if (fs.existsSync(ENV_FILE_PATH)) {
+      fs.writeFileSync(ENV_FILE_PATH + '.bak', fs.readFileSync(ENV_FILE_PATH));
+    }
+
+    fs.writeFileSync(COMPOSE_FILE_PATH, compose, 'utf8');
+    fs.writeFileSync(ENV_FILE_PATH, env, 'utf8');
+    
+    if (custom_commands && Array.isArray(custom_commands)) {
+      fs.writeFileSync(CUSTOM_CMDS_PATH, JSON.stringify(custom_commands, null, 2), 'utf8');
+    }
+
+    res.json({ success: true, message: '备份配置已导入。' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 18. Get WebDAV configuration
+app.get('/api/webdav/config', (req, res) => {
+  res.json(getWebDavConfig());
+});
+
+// 19. Save WebDAV configuration
+app.post('/api/webdav/config', (req, res) => {
+  try {
+    const { url, username, password, directory, autoBackup } = req.body;
+    if (!url || !username || !password) {
+      return res.status(400).json({ error: '所有 WebDAV 配置项均为必填项。' });
+    }
+    const config = { url, username, password, directory: directory || '/composemgt_backups', autoBackup: !!autoBackup };
+    fs.writeFileSync(WEBDAV_CONFIG_PATH, JSON.stringify(config, null, 2), 'utf8');
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 20. Test WebDAV connection
+app.post('/api/webdav/test', async (req, res) => {
+  try {
+    const { url, username, password, directory } = req.body;
+    const config = { url, username, password, directory };
+    await ensureDirectoryExists(config);
+    
+    const testFilename = 'connection_test.txt';
+    await webdavRequest(config, 'PUT', testFilename, { 'Content-Type': 'text/plain' }, 'ComposeMgt Connection Test');
+    await webdavRequest(config, 'DELETE', testFilename);
+    
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 21. Trigger WebDAV backup manually
+app.post('/api/webdav/backup', async (req, res) => {
+  try {
+    const config = getWebDavConfig();
+    if (!config.url || !config.username || !config.password) {
+      return res.status(400).json({ error: '请先完成 WebDAV 云盘配置！' });
+    }
+    await executeWebDavBackup(config);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 22. List backups on WebDAV
+app.get('/api/webdav/backups', async (req, res) => {
+  try {
+    const config = getWebDavConfig();
+    if (!config.url || !config.username || !config.password) {
+      return res.json([]);
+    }
+    await ensureDirectoryExists(config);
+    
+    const listRes = await webdavRequest(config, 'PROPFIND', '', { 'Depth': '1' });
+    const xml = await listRes.text();
+    
+    const responseRegex = /<[^:]*:response>([\s\S]*?)<\/[^:]*:response>/g;
+    let match;
+    const backups = [];
+    while ((match = responseRegex.exec(xml)) !== null) {
+      const segment = match[1];
+      const hrefMatch = segment.match(/<[^:]*:href>([^<]+)<\/[^:]*:href>/i);
+      const sizeMatch = segment.match(/<[^:]*:getcontentlength>([^<]+)<\/[^:]*:getcontentlength>/i);
+      const dateMatch = segment.match(/<[^:]*:getlastmodified>([^<]+)<\/[^:]*:getlastmodified>/i);
+      
+      if (hrefMatch) {
+        const decodedHref = decodeURIComponent(hrefMatch[1]);
+        if (decodedHref.endsWith('.json') && decodedHref.includes('composemgt_backup')) {
+          const filename = decodedHref.split('/').pop();
+          backups.push({
+            filename,
+            size: sizeMatch ? parseInt(sizeMatch[1]) : 0,
+            date: dateMatch ? dateMatch[1] : 'Unknown'
+          });
+        }
+      }
+    }
+    
+    backups.sort((a, b) => new Date(b.date) - new Date(a.date));
+    res.json(backups);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 23. Restore configuration from WebDAV file
+app.post('/api/webdav/restore', async (req, res) => {
+  try {
+    const { filename } = req.body;
+    if (!filename) {
+      return res.status(400).json({ error: '请指定要恢复的备份文件名。' });
+    }
+    const config = getWebDavConfig();
+    if (!config.url || !config.username || !config.password) {
+      return res.status(400).json({ error: 'WebDAV 未正确配置。' });
+    }
+    
+    const getRes = await webdavRequest(config, 'GET', filename);
+    const backupPayload = await getRes.json();
+    
+    if (!backupPayload.compose || !backupPayload.env) {
+      return res.status(400).json({ error: '拉取的云端备份格式不合法，缺少 compose 或 env。' });
+    }
+
+    if (fs.existsSync(COMPOSE_FILE_PATH)) {
+      fs.writeFileSync(COMPOSE_FILE_PATH + '.bak', fs.readFileSync(COMPOSE_FILE_PATH));
+    }
+    if (fs.existsSync(ENV_FILE_PATH)) {
+      fs.writeFileSync(ENV_FILE_PATH + '.bak', fs.readFileSync(ENV_FILE_PATH));
+    }
+
+    fs.writeFileSync(COMPOSE_FILE_PATH, backupPayload.compose, 'utf8');
+    fs.writeFileSync(ENV_FILE_PATH, backupPayload.env, 'utf8');
+    
+    if (backupPayload.custom_commands && Array.isArray(backupPayload.custom_commands)) {
+      fs.writeFileSync(CUSTOM_CMDS_PATH, JSON.stringify(backupPayload.custom_commands, null, 2), 'utf8');
+    }
+    
+    res.json({ success: true, message: '成功从 WebDAV 云端备份中恢复配置！' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Automated WebDAV Daily Backup Loop
+let lastBackupDate = '';
+setInterval(async () => {
+  try {
+    const config = getWebDavConfig();
+    if (!config.autoBackup || !config.url || !config.username || !config.password) {
+      return;
+    }
+    const today = new Date().toISOString().split('T')[0];
+    if (lastBackupDate === today) {
+      return;
+    }
+    const hour = new Date().getHours();
+    if (hour === 3) {
+      console.log('⏰ Triggering automated daily WebDAV backup...');
+      await executeWebDavBackup(config);
+      lastBackupDate = today;
+    }
+  } catch (err) {
+    console.error('Automated WebDAV backup failed:', err.message);
+  }
+}, 60 * 60 * 1000);
+
 // Start Server after checking docker
 const PORT = process.env.PORT || 9988;
 checkDockerAvailability().then(() => {
