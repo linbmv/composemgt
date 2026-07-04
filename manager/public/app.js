@@ -414,6 +414,33 @@ function setupEventListeners() {
   if (btnSaveCustomCmds) {
     btnSaveCustomCmds.addEventListener('click', saveCustomCommands);
   }
+
+  // Mobile Sidebar Toggle
+  const sidebar = document.querySelector('.sidebar');
+  const btnSidebarToggle = document.getElementById('btn-sidebar-toggle');
+  const sidebarBackdrop = document.getElementById('sidebar-backdrop');
+
+  if (btnSidebarToggle && sidebar && sidebarBackdrop) {
+    btnSidebarToggle.addEventListener('click', () => {
+      sidebar.classList.add('open');
+      sidebarBackdrop.classList.add('open');
+    });
+
+    sidebarBackdrop.addEventListener('click', () => {
+      sidebar.classList.remove('open');
+      sidebarBackdrop.classList.remove('open');
+    });
+
+    // Also close sidebar when clicking a nav item on mobile
+    document.querySelectorAll('.nav-item').forEach(item => {
+      item.addEventListener('click', () => {
+        if (window.innerWidth <= 768) {
+          sidebar.classList.remove('open');
+          sidebarBackdrop.classList.remove('open');
+        }
+      });
+    });
+  }
 }
 
 // Helpers for Modals
