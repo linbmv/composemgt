@@ -432,10 +432,19 @@ app.get('/api/services/:name/logs/stream', (req, res) => {
 // 9. Add new service to compose.yml
 app.post('/api/services', async (req, res) => {
   try {
-    const { name, image, publishedPort, targetPort, ipSuffix, environment, volumes } = req.body;
+    const { name, deploySource, image, buildContext, buildDockerfile, publishedPort, targetPort, ipSuffix, environment, volumes } = req.body;
     
-    if (!name || !image) {
-      return res.status(400).json({ error: 'Service name and image are required.' });
+    if (!name) {
+      return res.status(400).json({ error: '服务标识 (ID) 是必填项。' });
+    }
+    if (deploySource === 'build') {
+      if (!buildContext) {
+        return res.status(400).json({ error: '构建上下文路径 (Context) 是必填项。' });
+      }
+    } else {
+      if (!image) {
+        return res.status(400).json({ error: 'Docker 镜像地址是必填项。' });
+      }
     }
 
     if (!fs.existsSync(COMPOSE_FILE_PATH)) {
@@ -498,9 +507,19 @@ app.post('/api/services', async (req, res) => {
 
     // Build the new service structure
     const newService = {
-      container_name: name,
-      image: image,
+      container_name: name
     };
+
+    if (deploySource === 'build') {
+      newService.build = {
+        context: buildContext
+      };
+      if (buildDockerfile && buildDockerfile.trim()) {
+        newService.build.dockerfile = buildDockerfile.trim();
+      }
+    } else {
+      newService.image = image;
+    }
 
     // Add service base defaults
     // Since we use YAML anchors, we need to create the exact reference in YAML

@@ -340,8 +340,36 @@
             </div>
 
             <div class="form-group col-12">
+              <label>部署来源</label>
+              <div class="source-toggle-group" style="display: flex; gap: 12px; margin-bottom: 4px;">
+                <button type="button" class="btn btn-primary btn-sm source-toggle active" data-source="image" style="flex: 1; padding: 8px;">
+                  🐳 拉取镜像 (Image)
+                </button>
+                <button type="button" class="btn btn-secondary btn-sm source-toggle" data-source="build" style="flex: 1; padding: 8px;">
+                  🛠️ 本地构建 (Build)
+                </button>
+              </div>
+            </div>
+
+            <!-- Field: Image Address -->
+            <div class="form-group col-12" id="group-srv-image">
               <label for="srv-image" class="required">Docker 镜像地址</label>
               <input type="text" id="srv-image" required placeholder="例如: node:20-alpine, ghcr.io/username/repo:latest">
+            </div>
+
+            <!-- Fields: Build Context & Dockerfile -->
+            <div class="form-group col-12 hidden" id="group-srv-build">
+              <div style="display: flex; flex-direction: column; gap: 12px;">
+                <div class="form-group">
+                  <label for="srv-build-context" class="required">构建上下文路径 (Context)</label>
+                  <input type="text" id="srv-build-context" placeholder="例如: ./composemgt 或 /root/data/docker/composemgt">
+                  <span class="help-text">Dockerfile 所在的本地目录（相对或绝对路径）</span>
+                </div>
+                <div class="form-group">
+                  <label for="srv-build-dockerfile">Dockerfile 文件名</label>
+                  <input type="text" id="srv-build-dockerfile" placeholder="例如: Dockerfile (留空默认使用 Dockerfile)">
+                </div>
+              </div>
             </div>
 
             <div class="form-group col-6">

@@ -127,7 +127,48 @@ function setupEventListeners() {
     }
   });
   
-  btnAddContainer.addEventListener('click', () => openModal(modalAddService));
+  // Toggle deployment source (Image vs Build)
+  let currentDeploySource = 'image';
+  const sourceToggles = document.querySelectorAll('.source-toggle');
+  const groupSrvImage = document.getElementById('group-srv-image');
+  const groupSrvBuild = document.getElementById('group-srv-build');
+  const inputSrvImage = document.getElementById('srv-image');
+  const inputSrvBuildContext = document.getElementById('srv-build-context');
+
+  sourceToggles.forEach(btn => {
+    btn.addEventListener('click', () => {
+      sourceToggles.forEach(b => {
+        b.classList.remove('btn-primary', 'active');
+        b.classList.add('btn-secondary');
+      });
+      btn.classList.add('btn-primary', 'active');
+      btn.classList.remove('btn-secondary');
+
+      const source = btn.dataset.source;
+      currentDeploySource = source;
+
+      if (source === 'image') {
+        groupSrvImage.classList.remove('hidden');
+        groupSrvBuild.classList.add('hidden');
+        inputSrvImage.setAttribute('required', 'true');
+        inputSrvBuildContext.removeAttribute('required');
+      } else {
+        groupSrvImage.classList.add('hidden');
+        groupSrvBuild.classList.remove('hidden');
+        inputSrvImage.removeAttribute('required');
+        inputSrvBuildContext.setAttribute('required', 'true');
+      }
+    });
+  });
+
+  btnAddContainer.addEventListener('click', () => {
+    formAddService.reset();
+    volumesList.innerHTML = '';
+    envList.innerHTML = '';
+    const imgToggleBtn = document.querySelector('.source-toggle[data-source="image"]');
+    if (imgToggleBtn) imgToggleBtn.click();
+    openModal(modalAddService);
+  });
 
   // Search & Filter
   searchInput.addEventListener('input', (e) => {
@@ -712,8 +753,12 @@ function addEnvRow(key = '', val = '') {
 async function handleAddServiceSubmit(e) {
   e.preventDefault();
   
+  const deploySource = currentDeploySource || 'image';
   const name = document.getElementById('srv-name').value.trim();
-  const image = document.getElementById('srv-image').value.trim();
+  const image = deploySource === 'image' ? document.getElementById('srv-image').value.trim() : undefined;
+  const buildContext = deploySource === 'build' ? document.getElementById('srv-build-context').value.trim() : undefined;
+  const buildDockerfile = deploySource === 'build' ? document.getElementById('srv-build-dockerfile').value.trim() : undefined;
+  
   const publishedPort = document.getElementById('srv-pub-port').value;
   const targetPort = document.getElementById('srv-tgt-port').value;
   const ipSuffix = document.getElementById('srv-ip-suffix').value;
@@ -742,7 +787,10 @@ async function handleAddServiceSubmit(e) {
 
   const payload = {
     name,
+    deploySource,
     image,
+    buildContext,
+    buildDockerfile,
     publishedPort: publishedPort ? parseInt(publishedPort) : undefined,
     targetPort: targetPort ? parseInt(targetPort) : undefined,
     ipSuffix: ipSuffix ? parseInt(ipSuffix) : undefined,
