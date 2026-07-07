@@ -7,6 +7,7 @@ let containerSearch = '';
 let activeLogService = null;
 let activeLogInterval = null;
 let logEventSource = null;
+let currentDeploySource = 'image';
 
 // DOM Elements
 const sidebarNav = document.querySelector('.sidebar-nav');
@@ -128,7 +129,7 @@ function setupEventListeners() {
   });
   
   // Toggle deployment source (Image vs Build)
-  let currentDeploySource = 'image';
+  currentDeploySource = 'image';
   const sourceToggles = document.querySelectorAll('.source-toggle');
   const groupSrvImage = document.getElementById('group-srv-image');
   const groupSrvBuild = document.getElementById('group-srv-build');
