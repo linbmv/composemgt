@@ -1,11 +1,7 @@
 [
   {
-    "name": "状态监控 (stats)",
+    "name": "stats_mod",
     "cmd": "docker stats --no-stream"
-  },
-  {
-    "name": "磁盘占用 (df)",
-    "cmd": "docker system df"
   },
   {
     "name": "镜像列表 (images)",
