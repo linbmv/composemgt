@@ -1292,8 +1292,13 @@ function parseBulkEnv(text) {
   }
 
   lines.forEach(line => {
-    const trimmed = line.trim();
+    let trimmed = line.trim();
     if (!trimmed || trimmed.startsWith('#')) return;
+
+    // Remove YAML list prefix "- " if present
+    if (trimmed.startsWith('-')) {
+      trimmed = trimmed.substring(1).trim();
+    }
 
     let idx = trimmed.indexOf('=');
     if (idx === -1) {
