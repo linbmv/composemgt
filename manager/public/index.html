@@ -152,7 +152,10 @@
       <section id="tab-env" class="tab-pane">
         <div class="card env-editor-card">
           <div class="card-header">
-            <h3>.env 本地环境变量配置文件</h3>
+            <div style="display: flex; flex-direction: column; gap: 4px;">
+              <h3>.env 本地环境变量配置文件</h3>
+              <span class="text-muted text-sm">💡 支持在输入框中粘贴多行 KEY=VALUE 格式，自动分行</span>
+            </div>
             <div class="env-toggle">
               <button class="toggle-btn active" id="env-mode-visual">可视化编辑</button>
               <button class="toggle-btn" id="env-mode-raw">源码编辑</button>

@@ -845,6 +845,161 @@ button, input, select, textarea {
   padding: 24px;
 }
 
+/* Vercel-style Env Editor */
+.env-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.env-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px;
+  background-color: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  transition: all 0.2s ease;
+}
+
+.env-row:hover {
+  background-color: rgba(255, 255, 255, 0.04);
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+.env-row-inputs {
+  display: flex;
+  flex: 1;
+  gap: 12px;
+}
+
+.env-input-wrapper {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0; /* Allow flex items to shrink below content size */
+}
+
+.env-input-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding-left: 4px;
+}
+
+.env-key-input, .env-val-input {
+  width: 100%;
+  background-color: rgba(0, 0, 0, 0.2);
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 10px 12px;
+  outline: none;
+  font-family: var(--font-mono);
+  font-size: 0.875rem;
+  color: var(--color-text-primary);
+  transition: all 0.2s ease;
+}
+
+.env-key-input:focus, .env-val-input:focus {
+  border-color: var(--primary);
+  background-color: rgba(0, 0, 0, 0.4);
+  box-shadow: 0 0 0 3px rgba(36, 150, 237, 0.1);
+}
+
+.env-key-input {
+  font-weight: 600;
+  color: #60a5fa;
+}
+
+.env-val-input {
+  color: #a78bfa;
+}
+
+.env-key-input::placeholder {
+  color: rgba(255, 255, 255, 0.2);
+}
+
+.env-val-input::placeholder {
+  color: rgba(255, 255, 255, 0.2);
+}
+
+.btn-remove-env {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.btn-remove-env svg {
+  width: 16px;
+  height: 16px;
+}
+
+.btn-remove-env:hover {
+  background-color: var(--danger-soft);
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.env-add-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px;
+  margin-top: 8px;
+  background-color: rgba(255, 255, 255, 0.01);
+  border: 1px dashed var(--border-color);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  color: var(--color-text-secondary);
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
+.env-add-row:hover {
+  background-color: rgba(36, 150, 237, 0.05);
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+.env-add-row svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* Responsive: stack inputs on small screens */
+@media (max-width: 768px) {
+  .env-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .env-row-inputs {
+    flex-direction: column;
+  }
+
+  .btn-remove-env {
+    align-self: flex-end;
+  }
+}
+
+/* Legacy table styles (kept for backward compatibility) */
 .env-table {
   width: 100%;
   border-collapse: collapse;
@@ -863,28 +1018,6 @@ button, input, select, textarea {
   text-transform: uppercase;
   letter-spacing: 0.03em;
   background-color: rgba(0, 0, 0, 0.1);
-}
-
-.env-key-input, .env-val-input {
-  width: 100%;
-  background-color: rgba(255, 255, 255, 0.03);
-  border: 1px solid var(--border-color);
-  border-radius: 6px;
-  padding: 8px 12px;
-  outline: none;
-  font-family: var(--font-mono);
-  font-size: 0.85rem;
-  transition: border-color 0.2s ease;
-}
-
-.env-key-input:focus, .env-val-input:focus {
-  border-color: var(--primary);
-  background-color: rgba(255, 255, 255, 0.06);
-}
-
-.env-key-input {
-  font-weight: 600;
-  color: #38bdf8;
 }
 
 .btn-icon-danger {
