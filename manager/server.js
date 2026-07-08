@@ -71,7 +71,8 @@ function runCommand(command) {
       if (error) {
         reject(error.message + '\n' + stderr);
       } else {
-        resolve(stdout);
+        // Docker logs write to stderr, so combine both streams
+        resolve(stdout + stderr);
       }
     });
   });
@@ -109,12 +110,30 @@ function parseComposeServices() {
     return Object.entries(doc.services).map(([name, service]) => {
       // Find IP
       let ip = 'Dynamic';
+      let ipSuffix = '';
       if (service.networks && service.networks.D_Home && service.networks.D_Home.ipv4_address) {
         let rawIp = service.networks.D_Home.ipv4_address;
         // Resolve environment variable
         rawIp = rawIp.replace('${SUBNET_PREFIX}', subnetPrefix);
         rawIp = rawIp.replace('$SUBNET_PREFIX', subnetPrefix);
         ip = rawIp;
+
+        const parts = service.networks.D_Home.ipv4_address.split('.');
+        ipSuffix = parts[parts.length - 1].replace(/\}?$/, '').trim();
+      }
+
+      // Find Build Context and Dockerfile
+      let buildContext = '';
+      let buildDockerfile = '';
+      let deploySource = 'image';
+      if (service.build) {
+        deploySource = 'build';
+        if (typeof service.build === 'object') {
+          buildContext = service.build.context || '';
+          buildDockerfile = service.build.dockerfile || '';
+        } else {
+          buildContext = service.build;
+        }
       }
 
       // Find Ports
@@ -142,7 +161,11 @@ function parseComposeServices() {
       return {
         name,
         container_name: service.container_name || name,
-        image: service.image || (service.build ? `Build (${service.build})` : 'Custom build'),
+        image: service.image || '',
+        buildContext,
+        buildDockerfile,
+        deploySource,
+        ipSuffix,
         ip,
         ports,
         environment: service.environment || {},
@@ -437,10 +460,10 @@ app.get('/api/services/:name/logs/stream', (req, res) => {
   });
 });
 
-// 9. Add new service to compose.yml
+// 9. Add or Edit service in compose.yml
 app.post('/api/services', async (req, res) => {
   try {
-    const { name, deploySource, image, buildContext, buildDockerfile, publishedPort, targetPort, ipSuffix, environment, volumes } = req.body;
+    const { name, deploySource, image, buildContext, buildDockerfile, publishedPort, targetPort, ipSuffix, environment, volumes, isEdit } = req.body;
     
     if (!name) {
       return res.status(400).json({ error: '服务标识 (ID) 是必填项。' });
@@ -463,7 +486,7 @@ app.post('/api/services', async (req, res) => {
     const doc = YAML.parseDocument(fileContent);
 
     const services = doc.get('services')?.toJSON() || {};
-    if (services[name]) {
+    if (services[name] && !isEdit) {
       return res.status(400).json({ error: `服务 ID "${name}" 已经存在。` });
     }
 

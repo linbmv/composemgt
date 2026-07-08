@@ -683,6 +683,99 @@ button, input, select, textarea {
   margin-left: auto;
 }
 
+/* Horizontal Banner Layout for containers on large screens */
+@media (min-width: 992px) {
+  .container-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    width: 100%;
+  }
+  .container-card {
+    display: grid;
+    grid-template-areas:
+      "header details"
+      "actions actions";
+    grid-template-columns: 280px 1fr;
+    align-items: stretch;
+    padding: 0;
+    gap: 0;
+  }
+  .container-card.running::after {
+    width: 4px;
+    height: 100%;
+    top: 0;
+    left: 0;
+  }
+  .container-card.stopped::after {
+    width: 4px;
+    height: 100%;
+    top: 0;
+    left: 0;
+  }
+  .card-header-main {
+    grid-area: header;
+    border-bottom: none;
+    border-right: 1px solid var(--border-color);
+    padding: 20px 24px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 8px;
+  }
+  .card-title-group h3 {
+    margin-bottom: 4px;
+  }
+  .card-title-group .image-tag {
+    max-width: 100%;
+  }
+  .card-details {
+    grid-area: details;
+    padding: 20px 24px;
+    margin: 0;
+    display: flex;
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+    gap: 24px;
+    flex-grow: 1;
+  }
+  .detail-row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+    flex: 1;
+    min-width: 100px;
+  }
+  .detail-label {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--color-text-muted);
+  }
+  .detail-val {
+    font-size: 0.85rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 180px;
+  }
+  .card-actions {
+    grid-area: actions;
+    border-top: 1px solid var(--border-color);
+    background-color: rgba(0, 0, 0, 0.15);
+    padding: 12px 24px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .action-left, .action-right {
+    display: flex;
+    gap: 8px;
+    margin: 0;
+  }
+}
+
 /* Loading state styles */
 .loading-state {
   grid-column: 1 / -1;

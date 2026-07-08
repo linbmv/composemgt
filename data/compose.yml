@@ -53,13 +53,17 @@ services:
   cloudflare:
     container_name: cloudflare
     image: cloudflare/cloudflared:latest
-    <<: *service-base
     networks:
       D_Home:
         ipv4_address: ${SUBNET_PREFIX}.100
-    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    environment:
+      TEST_BANNER: ok
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
 
   # ===================================================================================
   # 2. postgres (101) - 需要特殊用户权限

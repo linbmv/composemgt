@@ -8,6 +8,8 @@ let activeLogService = null;
 let activeLogInterval = null;
 let logEventSource = null;
 let currentDeploySource = 'image';
+let isEditingService = false;
+let editingServiceName = '';
 
 // DOM Elements
 const sidebarNav = document.querySelector('.sidebar-nav');
@@ -43,10 +45,10 @@ const alertClose = alertBanner.querySelector('.alert-close');
 const modalAddService = document.getElementById('modal-add-service');
 const formAddService = document.getElementById('form-add-service');
 const ipPrefixDisplay = document.getElementById('ip-prefix-display');
-const btnAddVolumeField = document.querySelector('.btn-add-field[data-type="volume"]');
-const btnAddEnvField = document.querySelector('.btn-add-field[data-type="env"]');
-const volumesList = document.getElementById('volumes-list');
-const envList = document.getElementById('env-list');
+const srvVolumesRaw = document.getElementById('srv-volumes-raw');
+const srvEnvRaw = document.getElementById('srv-env-raw');
+const modalAddServiceTitle = document.getElementById('modal-add-service-title');
+const btnSubmitAddService = document.getElementById('btn-submit-add-service');
 
 // Modal: Logs
 const modalLogs = document.getElementById('modal-logs');
@@ -163,9 +165,14 @@ function setupEventListeners() {
   });
 
   btnAddContainer.addEventListener('click', () => {
+    isEditingService = false;
+    editingServiceName = '';
+    modalAddServiceTitle.textContent = '新增容器服务';
+    btnSubmitAddService.textContent = '提交创建';
+    document.getElementById('srv-name').removeAttribute('readonly');
     formAddService.reset();
-    volumesList.innerHTML = '';
-    envList.innerHTML = '';
+    srvVolumesRaw.value = '';
+    srvEnvRaw.value = '';
     const imgToggleBtn = document.querySelector('.source-toggle[data-source="image"]');
     if (imgToggleBtn) imgToggleBtn.click();
     openModal(modalAddService);
@@ -194,116 +201,7 @@ function setupEventListeners() {
     });
   });
 
-  // Add Dynamic Fields in Service Creation
-  btnAddVolumeField.addEventListener('click', () => addVolumeRow('', ''));
-  btnAddEnvField.addEventListener('click', () => addEnvRow('', ''));
 
-  // Bulk Env import listeners
-  const btnToggleBulkEnv = document.getElementById('btn-toggle-bulk-env');
-  const btnCancelBulkEnv = document.getElementById('btn-cancel-bulk-env');
-  const btnParseBulkEnv = document.getElementById('btn-parse-bulk-env');
-  const envBulkContainer = document.getElementById('env-bulk-container');
-  const envBulkTextarea = document.getElementById('env-bulk-textarea');
-  const btnAddEnvSingle = document.getElementById('btn-add-env-single');
-
-  if (btnToggleBulkEnv) {
-    btnToggleBulkEnv.addEventListener('click', () => {
-      envList.classList.add('hidden');
-      btnAddEnvSingle.classList.add('hidden');
-      btnToggleBulkEnv.classList.add('hidden');
-      envBulkContainer.classList.remove('hidden');
-      envBulkTextarea.focus();
-    });
-  }
-
-  if (btnCancelBulkEnv) {
-    btnCancelBulkEnv.addEventListener('click', () => {
-      envBulkContainer.classList.add('hidden');
-      envList.classList.remove('hidden');
-      btnAddEnvSingle.classList.remove('hidden');
-      btnToggleBulkEnv.classList.remove('hidden');
-      envBulkTextarea.value = '';
-    });
-  }
-
-  if (btnParseBulkEnv) {
-    btnParseBulkEnv.addEventListener('click', () => {
-      const text = envBulkTextarea.value;
-      const parsedObj = parseBulkEnv(text);
-      
-      const parsedKeys = Object.keys(parsedObj);
-      if (parsedKeys.length === 0) {
-        showAlert('未能解析出有效的环境变量，请检查格式！', 'error');
-        return;
-      }
-      
-      // Populate standard inputs
-      parsedKeys.forEach(key => {
-        addEnvRow(key, parsedObj[key]);
-      });
-      
-      showAlert(`成功导入 ${parsedKeys.length} 个环境变量！`);
-      
-      // Hide bulk and restore standard list
-      envBulkContainer.classList.add('hidden');
-      envList.classList.remove('hidden');
-      btnAddEnvSingle.classList.remove('hidden');
-      btnToggleBulkEnv.classList.remove('hidden');
-      envBulkTextarea.value = '';
-    });
-  }
-
-  // Bulk Volume import listeners
-  const btnToggleBulkVolume = document.getElementById('btn-toggle-bulk-volume');
-  const btnCancelBulkVolume = document.getElementById('btn-cancel-bulk-volume');
-  const btnParseBulkVolume = document.getElementById('btn-parse-bulk-volume');
-  const volumeBulkContainer = document.getElementById('volume-bulk-container');
-  const volumeBulkTextarea = document.getElementById('volume-bulk-textarea');
-  const btnAddVolumeSingle = document.getElementById('btn-add-volume-single');
-
-  if (btnToggleBulkVolume) {
-    btnToggleBulkVolume.addEventListener('click', () => {
-      volumesList.classList.add('hidden');
-      btnAddVolumeSingle.classList.add('hidden');
-      btnToggleBulkVolume.classList.add('hidden');
-      volumeBulkContainer.classList.remove('hidden');
-      volumeBulkTextarea.focus();
-    });
-  }
-
-  if (btnCancelBulkVolume) {
-    btnCancelBulkVolume.addEventListener('click', () => {
-      volumeBulkContainer.classList.add('hidden');
-      volumesList.classList.remove('hidden');
-      btnAddVolumeSingle.classList.remove('hidden');
-      btnToggleBulkVolume.classList.remove('hidden');
-      volumeBulkTextarea.value = '';
-    });
-  }
-
-  if (btnParseBulkVolume) {
-    btnParseBulkVolume.addEventListener('click', () => {
-      const text = volumeBulkTextarea.value;
-      const parsedList = parseBulkVolumes(text);
-      
-      if (parsedList.length === 0) {
-        showAlert('未能解析出有效的挂载卷，请检查格式！', 'error');
-        return;
-      }
-      
-      parsedList.forEach(item => {
-        addVolumeRow(item.host, item.container);
-      });
-      
-      showAlert(`成功导入 ${parsedList.length} 个数据卷挂载！`);
-      
-      volumeBulkContainer.classList.add('hidden');
-      volumesList.classList.remove('hidden');
-      btnAddVolumeSingle.classList.remove('hidden');
-      btnToggleBulkVolume.classList.remove('hidden');
-      volumeBulkTextarea.value = '';
-    });
-  }
 
   // Submit Add Service Form
   formAddService.addEventListener('submit', handleAddServiceSubmit);
@@ -643,6 +541,9 @@ function renderServices() {
           <button class="btn btn-secondary btn-xs" onclick="showLogsModal('${service.name}')" title="查看容器日志">
             日志
           </button>
+          <button class="btn btn-secondary btn-xs" onclick="showEditModal('${service.name}')" title="编辑服务配置">
+            编辑
+          </button>
           <button class="btn btn-secondary btn-xs" onclick="triggerAction('${service.name}', 'recreate')" title="强制重建并重启服务">
             重建
           </button>
@@ -753,31 +654,6 @@ async function handleDeleteConfirmClick() {
   }
 }
 
-// Service Creation Dialog: dynamic fields handlers
-function addVolumeRow(hostVal = '', containerVal = '') {
-  const row = document.createElement('div');
-  row.className = 'dynamic-row';
-  row.innerHTML = `
-    <input type="text" placeholder="./host/path" value="${hostVal}">
-    <span style="align-self:center">:</span>
-    <input type="text" placeholder="/container/path" value="${containerVal}">
-    <button type="button" class="btn-icon-danger" onclick="this.parentElement.remove()">&times;</button>
-  `;
-  volumesList.appendChild(row);
-}
-
-function addEnvRow(key = '', val = '') {
-  const row = document.createElement('div');
-  row.className = 'dynamic-row';
-  row.innerHTML = `
-    <input type="text" placeholder="KEY" value="${key}" style="font-family:var(--font-mono); font-weight:600;">
-    <span style="align-self:center">=</span>
-    <input type="text" placeholder="value" value="${val}">
-    <button type="button" class="btn-icon-danger" onclick="this.parentElement.remove()">&times;</button>
-  `;
-  envList.appendChild(row);
-}
-
 async function handleAddServiceSubmit(e) {
   e.preventDefault();
   
@@ -791,27 +667,15 @@ async function handleAddServiceSubmit(e) {
   const targetPort = document.getElementById('srv-tgt-port').value;
   const ipSuffix = document.getElementById('srv-ip-suffix').value;
 
-  // Compile volumes
-  const volumes = [];
-  volumesList.querySelectorAll('.dynamic-row').forEach(row => {
-    const inputs = row.querySelectorAll('input');
-    const host = inputs[0].value.trim();
-    const container = inputs[1].value.trim();
-    if (host && container) {
-      volumes.push(`${host}:${container}`);
-    }
-  });
+  // Compile volumes from raw textarea
+  const parsedVolumes = parseBulkVolumes(srvVolumesRaw.value);
+  const volumes = parsedVolumes.map(item => {
+    if (item.container) return `${item.host}:${item.container}`;
+    return item.host;
+  }).filter(Boolean);
 
-  // Compile environment variables
-  const environment = {};
-  envList.querySelectorAll('.dynamic-row').forEach(row => {
-    const inputs = row.querySelectorAll('input');
-    const key = inputs[0].value.trim();
-    const value = inputs[1].value.trim();
-    if (key) {
-      environment[key] = value;
-    }
-  });
+  // Compile environment variables from raw textarea
+  const environment = parseBulkEnv(srvEnvRaw.value);
 
   const payload = {
     name,
@@ -823,7 +687,8 @@ async function handleAddServiceSubmit(e) {
     targetPort: targetPort ? parseInt(targetPort) : undefined,
     ipSuffix: ipSuffix ? parseInt(ipSuffix) : undefined,
     environment,
-    volumes
+    volumes,
+    isEdit: isEditingService
   };
 
   try {
@@ -836,19 +701,88 @@ async function handleAddServiceSubmit(e) {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error);
     
-    showAlert(`容器服务 "${name}" 创建并成功插入 compose.yml！`);
+    if (isEditingService) {
+      showAlert(`容器服务 "${name}" 配置已成功修改并写入 compose.yml！请点击卡片下方的「重建」按钮以应用新配置。`);
+    } else {
+      showAlert(`容器服务 "${name}" 创建并成功插入 compose.yml！`);
+    }
     closeModal(modalAddService);
     
     // Reset form
     formAddService.reset();
-    volumesList.innerHTML = '';
-    envList.innerHTML = '';
+    srvVolumesRaw.value = '';
+    srvEnvRaw.value = '';
     
     loadServices();
   } catch (err) {
-    showAlert(`新增容器失败: ${err.message}`, 'error');
+    showAlert(`${isEditingService ? '编辑' : '新增'}容器失败: ${err.message}`, 'error');
   }
 }
+
+function showEditModal(serviceName) {
+  const service = servicesState.find(s => s.name === serviceName);
+  if (!service) {
+    showAlert('未找到该服务的数据', 'error');
+    return;
+  }
+
+  isEditingService = true;
+  editingServiceName = serviceName;
+
+  // Set modal header & button text
+  modalAddServiceTitle.textContent = `编辑容器服务 - ${serviceName}`;
+  btnSubmitAddService.textContent = '保存修改';
+
+  // Make name/ID field read-only
+  const inputName = document.getElementById('srv-name');
+  inputName.value = serviceName;
+  inputName.setAttribute('readonly', 'true');
+
+  // Set deploy source
+  const deploySource = service.deploySource || 'image';
+  const imgToggleBtn = document.querySelector(`.source-toggle[data-source="${deploySource}"]`);
+  if (imgToggleBtn) imgToggleBtn.click();
+
+  // Prefill image or build info
+  if (deploySource === 'image') {
+    document.getElementById('srv-image').value = service.image || '';
+  } else {
+    document.getElementById('srv-build-context').value = service.buildContext || '';
+    document.getElementById('srv-build-dockerfile').value = service.buildDockerfile || '';
+  }
+
+  // Prefill ports
+  if (service.ports && service.ports.length > 0) {
+    document.getElementById('srv-pub-port').value = service.ports[0].published || '';
+    document.getElementById('srv-tgt-port').value = service.ports[0].target || '';
+  } else {
+    document.getElementById('srv-pub-port').value = '';
+    document.getElementById('srv-tgt-port').value = '';
+  }
+
+  // Prefill IP suffix
+  document.getElementById('srv-ip-suffix').value = service.ipSuffix || '';
+
+  // Prefill volumes
+  if (service.volumes && service.volumes.length > 0) {
+    srvVolumesRaw.value = service.volumes.join('\n');
+  } else {
+    srvVolumesRaw.value = '';
+  }
+
+  // Prefill env vars
+  if (service.environment && Object.keys(service.environment).length > 0) {
+    const envLines = Object.entries(service.environment).map(([k, v]) => `${k}=${v}`);
+    srvEnvRaw.value = envLines.join('\n');
+  } else {
+    srvEnvRaw.value = '';
+  }
+
+  openModal(modalAddService);
+}
+
+// Expose to window so onclick works
+window.showEditModal = showEditModal;
 
 // .env Editor Functions
 let loadedEnvObject = {};
