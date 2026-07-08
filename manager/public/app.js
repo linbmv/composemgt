@@ -177,6 +177,13 @@ function setupEventListeners() {
     document.getElementById('srv-name').removeAttribute('readonly');
     formAddService.reset();
     
+    // Reset network mode selector to default
+    const srvNetModeInput = document.getElementById('srv-net-mode');
+    if (srvNetModeInput) {
+      srvNetModeInput.value = 'd_home';
+      handleNetModeChange('d_home');
+    }
+    
     // Clear dynamic inputs and append one initial empty row
     volumesList.innerHTML = '';
     envList.innerHTML = '';
@@ -271,6 +278,14 @@ function setupEventListeners() {
 
   // Submit Add Service Form
   formAddService.addEventListener('submit', handleAddServiceSubmit);
+
+  // Network Mode Selector Change Listener
+  const srvNetMode = document.getElementById('srv-net-mode');
+  if (srvNetMode) {
+    srvNetMode.addEventListener('change', (e) => {
+      handleNetModeChange(e.target.value);
+    });
+  }
 
   // Close Alert
   alertClose.addEventListener('click', () => alertBanner.classList.add('hidden'));
@@ -720,6 +735,27 @@ async function handleDeleteConfirmClick() {
   }
 }
 
+function handleNetModeChange(mode) {
+  const dHomeGroup = document.getElementById('group-srv-network-d-home');
+  const hostTip = document.getElementById('group-srv-network-host-tip');
+  const pubPortInput = document.getElementById('srv-pub-port');
+  const tgtPortInput = document.getElementById('srv-tgt-port');
+  const ipSuffixInput = document.getElementById('srv-ip-suffix');
+
+  if (mode === 'host') {
+    if (dHomeGroup) dHomeGroup.style.display = 'none';
+    if (hostTip) hostTip.classList.remove('hidden');
+    
+    // Clear values
+    if (pubPortInput) pubPortInput.value = '';
+    if (tgtPortInput) tgtPortInput.value = '';
+    if (ipSuffixInput) ipSuffixInput.value = '';
+  } else {
+    if (dHomeGroup) dHomeGroup.style.display = 'contents';
+    if (hostTip) hostTip.classList.add('hidden');
+  }
+}
+
 function addVolumeRow(hostVal = '', containerVal = '') {
   const row = document.createElement('div');
   row.className = 'dynamic-row';
@@ -753,6 +789,7 @@ async function handleAddServiceSubmit(e) {
   const buildContext = deploySource === 'build' ? document.getElementById('srv-build-context').value.trim() : undefined;
   const buildDockerfile = deploySource === 'build' ? document.getElementById('srv-build-dockerfile').value.trim() : undefined;
   
+  const networkMode = document.getElementById('srv-net-mode').value;
   const publishedPort = document.getElementById('srv-pub-port').value;
   const targetPort = document.getElementById('srv-tgt-port').value;
   const ipSuffix = document.getElementById('srv-ip-suffix').value;
@@ -789,9 +826,10 @@ async function handleAddServiceSubmit(e) {
     image,
     buildContext,
     buildDockerfile,
-    publishedPort: publishedPort ? parseInt(publishedPort) : undefined,
-    targetPort: targetPort ? parseInt(targetPort) : undefined,
-    ipSuffix: ipSuffix ? parseInt(ipSuffix) : undefined,
+    networkMode,
+    publishedPort: (publishedPort && networkMode !== 'host') ? parseInt(publishedPort) : undefined,
+    targetPort: (targetPort && networkMode !== 'host') ? parseInt(targetPort) : undefined,
+    ipSuffix: (ipSuffix && networkMode !== 'host') ? parseInt(ipSuffix) : undefined,
     environment,
     volumes,
     isEdit: isEditingService
@@ -868,6 +906,14 @@ function showEditModal(serviceName) {
 
   // Prefill IP suffix
   document.getElementById('srv-ip-suffix').value = service.ipSuffix || '';
+
+  // Prefill Network Mode
+  const netMode = service.networkMode || 'd_home';
+  const srvNetModeInput = document.getElementById('srv-net-mode');
+  if (srvNetModeInput) {
+    srvNetModeInput.value = netMode;
+  }
+  handleNetModeChange(netMode);
 
   // Prefill volumes list
   volumesList.innerHTML = '';

@@ -113,10 +113,12 @@ function parseComposeServices() {
     const subnetPrefix = envs.SUBNET_PREFIX || '172.18.0';
 
     return Object.entries(doc.services).map(([name, service]) => {
-      // Find IP
+      // Find IP and Network Mode
       let ip = 'Dynamic';
       let ipSuffix = '';
-      if (service.networks && service.networks.D_Home && service.networks.D_Home.ipv4_address) {
+      if (service.network_mode === 'host') {
+        ip = '主机网络 (Host Mode)';
+      } else if (service.networks && service.networks.D_Home && service.networks.D_Home.ipv4_address) {
         let rawIp = service.networks.D_Home.ipv4_address;
         // Resolve environment variable
         rawIp = rawIp.replace('${SUBNET_PREFIX}', subnetPrefix);
@@ -174,7 +176,8 @@ function parseComposeServices() {
         ip,
         ports,
         environment: service.environment || {},
-        volumes: service.volumes || []
+        volumes: service.volumes || [],
+        networkMode: service.network_mode === 'host' ? 'host' : 'd_home'
       };
     });
   } catch (error) {
@@ -468,7 +471,7 @@ app.get('/api/services/:name/logs/stream', (req, res) => {
 // 9. Add or Edit service in compose.yml
 app.post('/api/services', async (req, res) => {
   try {
-    const { name, deploySource, image, buildContext, buildDockerfile, publishedPort, targetPort, ipSuffix, environment, volumes, isEdit } = req.body;
+    const { name, deploySource, image, buildContext, buildDockerfile, publishedPort, targetPort, ipSuffix, environment, volumes, isEdit, networkMode } = req.body;
     
     if (!name) {
       return res.status(400).json({ error: '服务标识 (ID) 是必填项。' });
@@ -495,8 +498,10 @@ app.post('/api/services', async (req, res) => {
       return res.status(400).json({ error: `服务 ID "${name}" 已经存在。` });
     }
 
+    const isHostNet = (networkMode === 'host');
+
     // Check port conflict
-    if (publishedPort) {
+    if (publishedPort && !isHostNet) {
       const pubPortInt = parseInt(publishedPort);
       for (const [srvName, srvConfig] of Object.entries(services)) {
         if (srvName === name) continue;
@@ -523,7 +528,7 @@ app.post('/api/services', async (req, res) => {
     }
 
     // Check IP suffix conflict
-    if (ipSuffix) {
+    if (ipSuffix && !isHostNet) {
       const ipSuffixStr = ipSuffix.toString().trim();
       for (const [srvName, srvConfig] of Object.entries(services)) {
         if (srvName === name) continue;
@@ -563,25 +568,30 @@ app.post('/api/services', async (req, res) => {
     // Let's set the base anchor reference if possible, or build it manually:
     // We can define standard restart, logging, network setup
     
-    // Add networks & IP
-    if (ipSuffix) {
-      newService.networks = {
-        D_Home: {
-          ipv4_address: `\${SUBNET_PREFIX}.${ipSuffix}`
-        }
-      };
-    }
+    // Add network mode configuration
+    if (isHostNet) {
+      newService.network_mode = 'host';
+    } else {
+      // Add networks & IP
+      if (ipSuffix) {
+        newService.networks = {
+          D_Home: {
+            ipv4_address: `\${SUBNET_PREFIX}.${ipSuffix}`
+          }
+        };
+      }
 
-    // Add ports
-    if (publishedPort && targetPort) {
-      newService.ports = [
-        {
-          target: parseInt(targetPort),
-          published: parseInt(publishedPort),
-          host_ip: '${TS_HOST_IP}',
-          protocol: 'tcp'
-        }
-      ];
+      // Add ports
+      if (publishedPort && targetPort) {
+        newService.ports = [
+          {
+            target: parseInt(targetPort),
+            published: parseInt(publishedPort),
+            host_ip: '${TS_HOST_IP}',
+            protocol: 'tcp'
+          }
+        ];
+      }
     }
 
     // Add env vars

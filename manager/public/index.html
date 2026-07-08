@@ -379,25 +379,44 @@
               </div>
             </div>
 
-            <div class="form-group col-6">
-              <label for="srv-pub-port">宿主机端口 (Published)</label>
-              <input type="number" id="srv-pub-port" placeholder="例如: 825" min="1" max="65535">
-              <span class="help-text">暴露在 Tailscale IP (${TS_HOST_IP}) 的端口</span>
-            </div>
-
-            <div class="form-group col-6">
-              <label for="srv-tgt-port">容器内端口 (Target)</label>
-              <input type="number" id="srv-tgt-port" placeholder="例如: 8080" min="1" max="65535">
-              <span class="help-text">容器内部监听端口</span>
-            </div>
-
             <div class="form-group col-12">
-              <label for="srv-ip-suffix">子网固定 IP 尾数</label>
-              <div class="ip-input-group">
-                <span class="ip-prefix-label" id="ip-prefix-display">172.18.0.</span>
-                <input type="number" id="srv-ip-suffix" placeholder="118" min="2" max="254">
+              <label for="srv-net-mode">网络模式 (Network Mode)</label>
+              <select id="srv-net-mode" style="width: 100%; padding: 10px 14px; background-color: rgba(255,255,255,0.03); border:1px solid var(--border-color); border-radius:6px; outline:none; color:#fff; cursor: pointer;">
+                <option value="d_home" selected>自定义局域网固定 IP (D_Home)</option>
+                <option value="host">主机网络模式 (Host Mode)</option>
+              </select>
+              <span class="help-text">在主机网络模式下，容器将直接共享宿主机的网络命名空间。</span>
+            </div>
+
+            <!-- Group for D_Home Network Configurations -->
+            <div id="group-srv-network-d-home" style="display: contents;">
+              <div class="form-group col-6">
+                <label for="srv-pub-port">宿主机端口 (Published)</label>
+                <input type="number" id="srv-pub-port" placeholder="例如: 825" min="1" max="65535">
+                <span class="help-text">暴露在 Tailscale IP (${TS_HOST_IP}) 的端口</span>
               </div>
-              <span class="help-text">在自定义网络 D_Home 中分配的静态 IP 尾数</span>
+
+              <div class="form-group col-6">
+                <label for="srv-tgt-port">容器内端口 (Target)</label>
+                <input type="number" id="srv-tgt-port" placeholder="例如: 8080" min="1" max="65535">
+                <span class="help-text">容器内部监听端口</span>
+              </div>
+
+              <div class="form-group col-12">
+                <label for="srv-ip-suffix">子网固定 IP 尾数</label>
+                <div class="ip-input-group">
+                  <span class="ip-prefix-label" id="ip-prefix-display">172.18.0.</span>
+                  <input type="number" id="srv-ip-suffix" placeholder="118" min="2" max="254">
+                </div>
+                <span class="help-text">在自定义网络 D_Home 中分配的静态 IP 尾数</span>
+              </div>
+            </div>
+
+            <!-- Tip for Host Network Mode -->
+            <div class="form-group col-12 hidden" id="group-srv-network-host-tip">
+              <div style="font-size: 0.85rem; line-height: 1.6; padding: 12px 16px; background-color: rgba(14, 165, 233, 0.1); border: 1px dashed rgba(14, 165, 233, 0.3); border-radius: 6px; color: #38bdf8;">
+                💡 <strong>主机网络提示：</strong>此模式下容器与宿主机共享同一网络栈。容器内应用监听的所有端口将<strong>直接绑定至宿主机</strong>，无需也不应配置任何端口映射和 IP 尾数。请确保容器内部监听的端口在宿主机上未被占用。
+              </div>
             </div>
 
             <!-- Volumes & Env Row-by-Row design with auto-paste -->
