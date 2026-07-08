@@ -376,7 +376,70 @@ app.post('/api/services/:name/pull', async (req, res) => {
   }
 });
 
-// 8. Get service logs (Static snapshot)
+// 8. Git Pull + Build + Recreate for local build services
+app.post('/api/services/:name/build-update', async (req, res) => {
+  const { name } = req.params;
+  console.log(`Git pull and rebuild service: ${name}`);
+
+  if (isMockMode) {
+    return res.json({
+      success: true,
+      output: `[演示模式] 已模拟执行 git pull + docker build + recreate for ${name}`
+    });
+  }
+
+  try {
+    // Look up the build context from compose.yml (server-side, never trust client input)
+    const services = parseComposeServices();
+    const service = services.find(s => s.name === name);
+
+    if (!service || service.deploySource !== 'build' || !service.buildContext) {
+      return res.status(400).json({
+        error: `服务 "${name}" 不是本地构建类型，或未配置构建上下文路径 (build.context)。`
+      });
+    }
+
+    // Resolve build context path relative to the compose working directory
+    const contextPath = path.resolve(WORK_DIR, service.buildContext);
+
+    if (!fs.existsSync(contextPath)) {
+      return res.status(400).json({
+        error: `构建上下文路径不存在: ${contextPath}`
+      });
+    }
+
+    // Check if it's a git repository
+    const gitDir = path.join(contextPath, '.git');
+    if (!fs.existsSync(gitDir)) {
+      return res.status(400).json({
+        error: `构建上下文目录 "${contextPath}" 不是一个 Git 仓库（未找到 .git 目录），无法执行 git pull。请确认该目录是通过 git clone 获得的。`
+      });
+    }
+
+    // Step 1: Run git pull in the build context directory
+    const gitOutput = await new Promise((resolve, reject) => {
+      exec('git pull', { cwd: contextPath, timeout: 30000 }, (error, stdout, stderr) => {
+        if (error) {
+          reject(`Git Pull 失败: ${error.message}\n${stderr}`);
+        } else {
+          resolve((stdout + stderr).trim());
+        }
+      });
+    });
+
+    // Step 2: Rebuild and recreate the container
+    const buildOutput = await runCommand(`docker compose up -d --force-recreate --build ${name}`);
+
+    res.json({
+      success: true,
+      output: `=== Git Pull (${service.buildContext}) ===\n${gitOutput}\n\n=== Docker Build & Recreate ===\n${buildOutput}`
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.toString() });
+  }
+});
+
+// 9. Get service logs (Static snapshot)
 app.get('/api/services/:name/logs', async (req, res) => {
   const { name } = req.params;
   if (isMockMode) {

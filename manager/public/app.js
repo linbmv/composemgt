@@ -625,12 +625,17 @@ function renderServices() {
           <button class="btn btn-secondary btn-xs" onclick="showEditModal('${service.name}')" title="编辑服务配置">
             编辑
           </button>
-          <button class="btn btn-secondary btn-xs" onclick="triggerAction('${service.name}', 'recreate')" title="强制重建并重启服务">
+          <button class="btn btn-secondary btn-xs" onclick="triggerAction('${service.name}', 'recreate')" title="${service.deploySource === 'build' ? '使用当前本地源码重新构建镜像并强制重建容器' : '使用当前本地镜像强制重建容器（适用于修改配置后应用变更）'}">
             重建
           </button>
-          <button class="btn btn-secondary btn-xs" onclick="triggerAction('${service.name}', 'pull')" title="拉取最新镜像并重启">
-            更新
-          </button>
+          ${service.deploySource === 'build'
+            ? `<button class="btn btn-primary btn-xs" onclick="triggerAction('${service.name}', 'build-update')" title="在构建目录执行 git pull 拉取最新代码 → 重新构建镜像 → 重建容器">
+                🔄 拉取重建
+              </button>`
+            : `<button class="btn btn-primary btn-xs" onclick="triggerAction('${service.name}', 'pull')" title="从远程镜像仓库拉取最新镜像版本 → 重建容器">
+                🔄 拉取更新
+              </button>`
+          }
           <button class="btn btn-danger btn-xs" onclick="showDeleteModal('${service.name}')" title="从编排中删除此服务">
             &times;
           </button>
