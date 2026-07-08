@@ -1376,3 +1376,46 @@ button, input, select, textarea {
     max-height: 85vh;
   }
 }
+
+.dynamic-row {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 8px;
+  width: 100%;
+}
+
+.dynamic-row input {
+  flex: 1;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 8px 12px;
+  color: #ffffff;
+  outline: none;
+  font-size: 0.85rem;
+  transition: border-color 0.15s ease;
+}
+
+.dynamic-row input:focus {
+  border-color: var(--primary);
+}
+
+.btn-icon-danger {
+  background: transparent;
+  border: none;
+  color: var(--danger);
+  font-size: 1.5rem;
+  cursor: pointer;
+  padding: 0 8px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s ease;
+}
+
+.btn-icon-danger:hover {
+  color: var(--danger-hover, #ff6b6b);
+}
+

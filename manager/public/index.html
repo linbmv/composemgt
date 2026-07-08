@@ -400,21 +400,31 @@
               <span class="help-text">在自定义网络 D_Home 中分配的静态 IP 尾数</span>
             </div>
 
-            <!-- Volumes & Env Textareas (Simplified Copy/Paste design) -->
+            <!-- Volumes & Env Row-by-Row design with auto-paste -->
             <div class="form-group col-12">
-              <label for="srv-volumes-raw">挂载卷 (Volumes)</label>
-              <textarea id="srv-volumes-raw" placeholder="例如：
-./meowcli/data:/data
-/root/data:/webdav" style="width: 100%; height: 100px; font-family: var(--font-mono); font-size: 0.85rem; padding: 10px; background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 6px; outline: none; color: #ffffff; resize: vertical;"></textarea>
-              <span class="help-text">每行一个挂载关系（格式：宿主机路径:容器路径，支持 YAML <code>- 路径:路径</code> 格式，可直接复制粘贴）</span>
+              <label style="margin-bottom:0; display:flex; justify-content:space-between; align-items:center; width:100%;">
+                <span>挂载卷 (Volumes)</span>
+                <span style="font-size:0.75rem; color:var(--primary); font-weight:normal;">💡 提示：在任意行中直接粘贴 (Ctrl+V) 多行配置可自动分行</span>
+              </label>
+              <div id="volumes-list" class="dynamic-inputs" style="display:flex; flex-direction:column; gap:8px; margin-top:8px;">
+                <!-- Added dynamically -->
+              </div>
+              <button type="button" class="btn btn-secondary btn-xs btn-add-field" data-type="volume" id="btn-add-volume-single" style="margin-top: 8px;">
+                + 添加目录映射
+              </button>
             </div>
 
             <div class="form-group col-12">
-              <label for="srv-env-raw">环境变量 (Environment)</label>
-              <textarea id="srv-env-raw" placeholder="例如：
-LISTEN_ADDR=:3000
-TZ=Asia/Shanghai" style="width: 100%; height: 120px; font-family: var(--font-mono); font-size: 0.85rem; padding: 10px; background: rgba(255,255,255,0.03); border: 1px solid var(--border-color); border-radius: 6px; outline: none; color: #ffffff; resize: vertical;"></textarea>
-              <span class="help-text">每行一个变量（格式：KEY=VALUE，支持 JSON <code>{"KEY":"VALUE"}</code>，可直接复制粘贴）</span>
+              <label style="margin-bottom:0; display:flex; justify-content:space-between; align-items:center; width:100%;">
+                <span>环境变量 (Environment)</span>
+                <span style="font-size:0.75rem; color:var(--primary); font-weight:normal;">💡 提示：在任意行中直接粘贴 (Ctrl+V) 多行配置可自动分行</span>
+              </label>
+              <div id="env-list" class="dynamic-inputs" style="display:flex; flex-direction:column; gap:8px; margin-top:8px;">
+                <!-- Added dynamically -->
+              </div>
+              <button type="button" class="btn btn-secondary btn-xs btn-add-field" data-type="env" id="btn-add-env-single" style="margin-top: 8px;">
+                + 添加环境变量
+              </button>
             </div>
           </div>
         </div>

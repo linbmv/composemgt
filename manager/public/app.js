@@ -11,6 +11,11 @@ let currentDeploySource = 'image';
 let isEditingService = false;
 let editingServiceName = '';
 
+const stripAnsi = (str) => {
+  if (!str) return '';
+  return str.replace(/[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, '');
+};
+
 // DOM Elements
 const sidebarNav = document.querySelector('.sidebar-nav');
 const navItems = document.querySelectorAll('.nav-item');
@@ -45,8 +50,8 @@ const alertClose = alertBanner.querySelector('.alert-close');
 const modalAddService = document.getElementById('modal-add-service');
 const formAddService = document.getElementById('form-add-service');
 const ipPrefixDisplay = document.getElementById('ip-prefix-display');
-const srvVolumesRaw = document.getElementById('srv-volumes-raw');
-const srvEnvRaw = document.getElementById('srv-env-raw');
+const volumesList = document.getElementById('volumes-list');
+const envList = document.getElementById('env-list');
 const modalAddServiceTitle = document.getElementById('modal-add-service-title');
 const btnSubmitAddService = document.getElementById('btn-submit-add-service');
 
@@ -171,8 +176,13 @@ function setupEventListeners() {
     btnSubmitAddService.textContent = '提交创建';
     document.getElementById('srv-name').removeAttribute('readonly');
     formAddService.reset();
-    srvVolumesRaw.value = '';
-    srvEnvRaw.value = '';
+    
+    // Clear dynamic inputs and append one initial empty row
+    volumesList.innerHTML = '';
+    envList.innerHTML = '';
+    addVolumeRow();
+    addEnvRow();
+
     const imgToggleBtn = document.querySelector('.source-toggle[data-source="image"]');
     if (imgToggleBtn) imgToggleBtn.click();
     openModal(modalAddService);
@@ -200,8 +210,64 @@ function setupEventListeners() {
       closeModal(modal);
     });
   });
+  // Bind dynamic fields adding buttons
+  const btnAddVolumeSingle = document.getElementById('btn-add-volume-single');
+  if (btnAddVolumeSingle) {
+    btnAddVolumeSingle.addEventListener('click', () => addVolumeRow());
+  }
+  const btnAddEnvSingle = document.getElementById('btn-add-env-single');
+  if (btnAddEnvSingle) {
+    btnAddEnvSingle.addEventListener('click', () => addEnvRow());
+  }
 
+  // Auto-parse on paste for volumes list
+  if (volumesList) {
+    volumesList.addEventListener('paste', (e) => {
+      const text = (e.clipboardData || window.clipboardData).getData('text');
+      if (text && (text.includes('\n') || text.includes(':'))) {
+        e.preventDefault();
+        const parsed = parseBulkVolumes(text);
+        if (parsed.length > 0) {
+          // If the current row's inputs are empty, remove it
+          const targetRow = e.target.closest('.dynamic-row');
+          if (targetRow) {
+            const inputs = targetRow.querySelectorAll('input');
+            if (!inputs[0].value.trim() && !inputs[1].value.trim()) {
+              targetRow.remove();
+            }
+          }
+          parsed.forEach(item => {
+            addVolumeRow(item.host, item.container);
+          });
+        }
+      }
+    });
+  }
 
+  // Auto-parse on paste for env list
+  if (envList) {
+    envList.addEventListener('paste', (e) => {
+      const text = (e.clipboardData || window.clipboardData).getData('text');
+      if (text && (text.includes('\n') || text.includes('=') || text.includes(':'))) {
+        e.preventDefault();
+        const parsed = parseBulkEnv(text);
+        const keys = Object.keys(parsed);
+        if (keys.length > 0) {
+          // If the current row's inputs are empty, remove it
+          const targetRow = e.target.closest('.dynamic-row');
+          if (targetRow) {
+            const inputs = targetRow.querySelectorAll('input');
+            if (!inputs[0].value.trim() && !inputs[1].value.trim()) {
+              targetRow.remove();
+            }
+          }
+          keys.forEach(k => {
+            addEnvRow(k, parsed[k]);
+          });
+        }
+      }
+    });
+  }
 
   // Submit Add Service Form
   formAddService.addEventListener('submit', handleAddServiceSubmit);
@@ -211,7 +277,7 @@ function setupEventListeners() {
 
   // Logs Modal Refresher
   btnRefreshLogs.addEventListener('click', () => {
-    if (activeLogService) loadServiceLogs(activeLogService);
+    if (activeLogService) showLogsModal(activeLogService);
   });
 
   // Delete Confirm Button
@@ -271,12 +337,12 @@ function setupEventListeners() {
         const data = await res.json();
         
         if (!res.ok || data.error) {
-          terminalConsoleOutput.textContent += `⚠️ 错误: ${data.error || '执行命令失败'}\n`;
+          terminalConsoleOutput.textContent += `⚠️ 错误: ${stripAnsi(data.error) || '执行命令失败'}\n`;
         } else {
           if (data.stderr) {
-            terminalConsoleOutput.textContent += `⚠️ 警告:\n${data.stderr}\n`;
+            terminalConsoleOutput.textContent += `⚠️ 警告:\n${stripAnsi(data.stderr)}\n`;
           }
-          terminalConsoleOutput.textContent += data.stdout || '（命令已成功运行，无任何标准输出）\n';
+          terminalConsoleOutput.textContent += stripAnsi(data.stdout) || '（命令已成功运行，无任何标准输出）\n';
         }
       } catch (err) {
         terminalConsoleOutput.textContent += `⚠️ 无法连接后端服务器: ${err.message}\n`;
@@ -611,8 +677,8 @@ function showLogsModal(serviceName) {
   logEventSource = new EventSource(`/api/services/${serviceName}/logs/stream`);
 
   logEventSource.onmessage = (event) => {
-    // Append new logs line
-    logsOutput.textContent += event.data + '\n';
+    // Append new logs line (stripping ANSI escape codes)
+    logsOutput.textContent += stripAnsi(event.data) + '\n';
     // Auto scroll to bottom
     logsOutput.scrollTop = logsOutput.scrollHeight;
   };
@@ -654,6 +720,30 @@ async function handleDeleteConfirmClick() {
   }
 }
 
+function addVolumeRow(hostVal = '', containerVal = '') {
+  const row = document.createElement('div');
+  row.className = 'dynamic-row';
+  row.innerHTML = `
+    <input type="text" placeholder="./host/path" value="${hostVal}">
+    <span style="align-self:center">:</span>
+    <input type="text" placeholder="/container/path" value="${containerVal}">
+    <button type="button" class="btn-icon-danger" onclick="this.parentElement.remove()">&times;</button>
+  `;
+  volumesList.appendChild(row);
+}
+
+function addEnvRow(key = '', val = '') {
+  const row = document.createElement('div');
+  row.className = 'dynamic-row';
+  row.innerHTML = `
+    <input type="text" placeholder="KEY" value="${key}" style="font-family:var(--font-mono); font-weight:600;">
+    <span style="align-self:center">=</span>
+    <input type="text" placeholder="value" value="${val}">
+    <button type="button" class="btn-icon-danger" onclick="this.parentElement.remove()">&times;</button>
+  `;
+  envList.appendChild(row);
+}
+
 async function handleAddServiceSubmit(e) {
   e.preventDefault();
   
@@ -667,15 +757,31 @@ async function handleAddServiceSubmit(e) {
   const targetPort = document.getElementById('srv-tgt-port').value;
   const ipSuffix = document.getElementById('srv-ip-suffix').value;
 
-  // Compile volumes from raw textarea
-  const parsedVolumes = parseBulkVolumes(srvVolumesRaw.value);
-  const volumes = parsedVolumes.map(item => {
-    if (item.container) return `${item.host}:${item.container}`;
-    return item.host;
-  }).filter(Boolean);
+  // Compile volumes from visual list inputs
+  const volumes = [];
+  const volRows = volumesList.querySelectorAll('.dynamic-row');
+  volRows.forEach(row => {
+    const inputs = row.querySelectorAll('input');
+    const host = inputs[0].value.trim();
+    const container = inputs[1].value.trim();
+    if (host && container) {
+      volumes.push(`${host}:${container}`);
+    } else if (host) {
+      volumes.push(host);
+    }
+  });
 
-  // Compile environment variables from raw textarea
-  const environment = parseBulkEnv(srvEnvRaw.value);
+  // Compile environment variables from visual list inputs
+  const environment = {};
+  const envRows = envList.querySelectorAll('.dynamic-row');
+  envRows.forEach(row => {
+    const inputs = row.querySelectorAll('input');
+    const key = inputs[0].value.trim();
+    const val = inputs[1].value.trim();
+    if (key) {
+      environment[key] = val;
+    }
+  });
 
   const payload = {
     name,
@@ -708,10 +814,10 @@ async function handleAddServiceSubmit(e) {
     }
     closeModal(modalAddService);
     
-    // Reset form
+    // Reset form and clear dynamic rows
     formAddService.reset();
-    srvVolumesRaw.value = '';
-    srvEnvRaw.value = '';
+    volumesList.innerHTML = '';
+    envList.innerHTML = '';
     
     loadServices();
   } catch (err) {
@@ -763,19 +869,29 @@ function showEditModal(serviceName) {
   // Prefill IP suffix
   document.getElementById('srv-ip-suffix').value = service.ipSuffix || '';
 
-  // Prefill volumes
+  // Prefill volumes list
+  volumesList.innerHTML = '';
   if (service.volumes && service.volumes.length > 0) {
-    srvVolumesRaw.value = service.volumes.join('\n');
+    service.volumes.forEach(volStr => {
+      const parts = volStr.split(':');
+      if (parts.length >= 2) {
+        addVolumeRow(parts[0], parts.slice(1).join(':'));
+      } else {
+        addVolumeRow(volStr, '');
+      }
+    });
   } else {
-    srvVolumesRaw.value = '';
+    addVolumeRow();
   }
 
-  // Prefill env vars
+  // Prefill env vars list
+  envList.innerHTML = '';
   if (service.environment && Object.keys(service.environment).length > 0) {
-    const envLines = Object.entries(service.environment).map(([k, v]) => `${k}=${v}`);
-    srvEnvRaw.value = envLines.join('\n');
+    Object.entries(service.environment).forEach(([k, v]) => {
+      addEnvRow(k, v);
+    });
   } else {
-    srvEnvRaw.value = '';
+    addEnvRow();
   }
 
   openModal(modalAddService);
