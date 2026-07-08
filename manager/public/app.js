@@ -1063,7 +1063,13 @@ function createEnvRow(key = '', val = '') {
           const currentIndex = Array.from(envList.children).indexOf(row);
 
           lines.forEach((line, idx) => {
-            const [k, ...vParts] = line.split('=');
+            // Remove YAML list prefix "- " if present
+            let cleanedLine = line.trim();
+            if (cleanedLine.startsWith('- ')) {
+              cleanedLine = cleanedLine.substring(2).trim();
+            }
+
+            const [k, ...vParts] = cleanedLine.split('=');
             const v = vParts.join('='); // Handle values with '=' in them
 
             if (idx === 0) {
