@@ -1210,14 +1210,22 @@ app.get('/api/webdav/backups', async (req, res) => {
     const listRes = await webdavRequest(config, 'PROPFIND', '', { 'Depth': '1' });
     const xml = await listRes.text();
     
-    const responseRegex = /<[^:]*:response>([\s\S]*?)<\/[^:]*:response>/g;
-    let match;
+    // Log raw XML for debugging (first 500 chars)
+    console.log(`📋 WebDAV PROPFIND response (first 500 chars): ${xml.substring(0, 500)}`);
+    
+    // Robust regex: match <response>, <D:response>, <d:response>, <DAV:response>, etc.
+    // The namespace prefix is optional: (?:[a-zA-Z0-9]+:)? matches zero or one prefix
+    const responseRegex = /<(?:[a-zA-Z0-9]+:)?response(?:\s[^>]*)?>[\s\S]*?<\/(?:[a-zA-Z0-9]+:)?response>/gi;
     const backups = [];
+    let match;
+    
     while ((match = responseRegex.exec(xml)) !== null) {
-      const segment = match[1];
-      const hrefMatch = segment.match(/<[^:]*:href>([^<]+)<\/[^:]*:href>/i);
-      const sizeMatch = segment.match(/<[^:]*:getcontentlength>([^<]+)<\/[^:]*:getcontentlength>/i);
-      const dateMatch = segment.match(/<[^:]*:getlastmodified>([^<]+)<\/[^:]*:getlastmodified>/i);
+      const segment = match[0];
+      
+      // Extract href (handles all namespace prefix variants)
+      const hrefMatch = segment.match(/<(?:[a-zA-Z0-9]+:)?href[^>]*>([^<]+)<\/(?:[a-zA-Z0-9]+:)?href>/i);
+      const sizeMatch = segment.match(/<(?:[a-zA-Z0-9]+:)?getcontentlength[^>]*>([^<]+)<\/(?:[a-zA-Z0-9]+:)?getcontentlength>/i);
+      const dateMatch = segment.match(/<(?:[a-zA-Z0-9]+:)?getlastmodified[^>]*>([^<]+)<\/(?:[a-zA-Z0-9]+:)?getlastmodified>/i);
       
       if (hrefMatch) {
         const decodedHref = decodeURIComponent(hrefMatch[1]);
@@ -1232,9 +1240,11 @@ app.get('/api/webdav/backups', async (req, res) => {
       }
     }
     
+    console.log(`📋 WebDAV backups found: ${backups.length}`);
     backups.sort((a, b) => new Date(b.date) - new Date(a.date));
     res.json(backups);
   } catch (error) {
+    console.error('WebDAV list backups error:', error.message);
     res.status(500).json({ error: error.message });
   }
 });
