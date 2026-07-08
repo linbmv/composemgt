@@ -67,9 +67,14 @@ function saveEnvVariables(envObj) {
 // Run exec command wrapped in Promise
 function runCommand(command) {
   return new Promise((resolve, reject) => {
-    exec(command, { cwd: WORK_DIR }, (error, stdout, stderr) => {
+    // Enforce a 15-second timeout to prevent hanging commands from blocking the backend
+    exec(command, { cwd: WORK_DIR, timeout: 15000 }, (error, stdout, stderr) => {
       if (error) {
-        reject(error.message + '\n' + stderr);
+        if (error.killed) {
+          reject('命令运行超时（15秒限制），已被系统强行终止。请检查该指令是否在等待交互输入，或者包含持续输出/跟踪参数（如 -f ）。\n' + stdout + stderr);
+        } else {
+          reject(error.message + '\n' + stderr);
+        }
       } else {
         // Docker logs write to stderr, so combine both streams
         resolve(stdout + stderr);
@@ -804,6 +809,29 @@ app.post('/api/terminal/run', async (req, res) => {
     if (!trimmedCmd.startsWith('docker')) {
       return res.status(403).json({
         error: '出于系统安全考虑，控制台目前仅允许执行以 "docker" 或 "docker compose" 开头的运维管理指令。'
+      });
+    }
+
+    const cmdLower = trimmedCmd.toLowerCase();
+    
+    // 1. Logs follow check
+    if (cmdLower.includes('logs') && (/\s-f(\s|$)/.test(cmdLower) || cmdLower.includes('--follow'))) {
+      return res.status(403).json({
+        error: '控制台暂不支持持续跟踪日志（-f 或 --follow 参数）。如果您想查看日志，请直接运行不带 -f 的命令（例如使用 "docker logs [容器名]" 或 "docker compose logs"）。'
+      });
+    }
+    
+    // 2. Interactive terminal checks
+    if (/\s-(it|i|t)(\s|$)/.test(cmdLower) || cmdLower.includes('--interactive') || cmdLower.includes('--tty')) {
+      return res.status(403).json({
+        error: '网页控制台属于非交互式终端，无法执行包含交互式或伪终端参数（如 -it, -i, -t, --interactive, --tty）的指令。'
+      });
+    }
+    
+    // 3. Attach check
+    if (/\sattach(\s|$)/.test(cmdLower)) {
+      return res.status(403).json({
+        error: '控制台不支持 attach 命令，因为这会导致后台进程永久阻塞。'
       });
     }
 
