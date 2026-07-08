@@ -1116,9 +1116,6 @@ function syncVisualToRaw() {
 
   envRawTextarea.value = content.trim() + '\n';
 }
-  
-  envRawTextarea.value = content.trim() + '\n';
-}
 
 async function handleSaveEnvSubmit() {
   let payload = {};
