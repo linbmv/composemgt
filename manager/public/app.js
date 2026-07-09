@@ -682,9 +682,6 @@ function renderServices() {
             : `<button class="btn btn-secondary btn-xs" onclick="showEditModal('${service.name}')" title="编辑服务配置">
             编辑
           </button>
-          <button class="btn btn-secondary btn-xs" onclick="triggerAction('${service.name}', 'recreate')" title="${service.deploySource === 'build' ? '使用当前本地源码重新构建镜像并强制重建容器' : '使用当前本地镜像强制重建容器（适用于修改配置后应用变更）'}">
-            重建
-          </button>
           ${service.deploySource === 'build'
             ? `<button class="btn btn-primary btn-xs" onclick="triggerAction('${service.name}', 'build-update')" title="本地构建型更新：在构建目录 git pull 拉取最新代码 → 重新构建镜像 → 重建容器">
                 🔄 更新
@@ -693,6 +690,9 @@ function renderServices() {
                 🔄 更新
               </button>`
           }
+          <button class="btn btn-secondary btn-xs" onclick="triggerAction('${service.name}', 'recreate')" title="${service.deploySource === 'build' ? '使用当前本地源码重新构建镜像并强制重建容器（不拉取新代码）' : '使用当前本地镜像强制重建容器（不拉取新镜像，适用于修改配置后应用变更）'}">
+            重建
+          </button>
           <button class="btn btn-danger btn-xs" onclick="showDeleteModal('${service.name}')" title="从编排中删除此服务">
             &times;
           </button>`
@@ -1107,136 +1107,121 @@ function syncRawToVisual() {
   if (!container) return;
   container.innerHTML = '';
 
-  // Vercel-style: single flat list of all env vars
-  const envList = document.createElement('div');
-  envList.className = 'env-list';
+  // 1. Render Global Group first
+  renderEnvGroupCard('global', '全局公共配置 (Global Config)', loadedEnvGrouping.global || [], loadedEnvObject);
 
-  // Render all existing env vars
-  for (const [key, val] of Object.entries(loadedEnvObject)) {
-    envList.appendChild(createEnvRow(key, val));
+  // 2. Render each service group
+  if (loadedEnvGrouping.services) {
+    for (const [srvName, keys] of Object.entries(loadedEnvGrouping.services)) {
+      renderEnvGroupCard(srvName, `${srvName} 服务专属变量`, keys || [], loadedEnvObject);
+    }
   }
-
-  // Add "Add Variable" button at bottom
-  const addButton = document.createElement('button');
-  addButton.type = 'button';
-  addButton.className = 'env-add-row';
-  addButton.innerHTML = `
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-      <line x1="12" y1="5" x2="12" y2="19"></line>
-      <line x1="5" y1="12" x2="19" y2="12"></line>
-    </svg>
-    <span>Add Variable</span>
-  `;
-  addButton.addEventListener('click', () => {
-    const newRow = createEnvRow('', '');
-    envList.appendChild(newRow);
-    // Focus on the key input
-    newRow.querySelector('.env-key-input').focus();
-  });
-
-  container.appendChild(envList);
-  container.appendChild(addButton);
 }
 
-function createEnvRow(key = '', val = '') {
-  const row = document.createElement('div');
-  row.className = 'env-row';
+function renderEnvGroupCard(groupId, groupTitle, keys, envObj) {
+  const container = document.getElementById('env-groups-container');
 
-  const escapeHtml = (str) => String(str).replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const card = document.createElement('div');
+  card.className = 'env-group-card';
+  card.dataset.groupId = groupId;
 
-  row.innerHTML = `
-    <div class="env-row-inputs">
-      <div class="env-input-wrapper">
-        <label class="env-input-label">Key</label>
-        <input type="text" class="env-key-input" value="${escapeHtml(key)}" placeholder="VARIABLE_NAME">
-      </div>
-      <div class="env-input-wrapper">
-        <label class="env-input-label">Value</label>
-        <input type="text" class="env-val-input" value="${escapeHtml(val)}" placeholder="Enter value">
-      </div>
+  card.innerHTML = `
+    <div class="env-group-header">
+      <span class="env-group-title">${groupTitle}</span>
+      <span class="badge badge-xs bg-secondary-soft">${keys.length} 个变量</span>
+      <button type="button" class="btn btn-secondary btn-xs btn-add-group-var" style="margin-left:auto;">
+        + 新增变量
+      </button>
     </div>
-    <button type="button" class="btn-remove-env" title="Remove">
-      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <line x1="18" y1="6" x2="6" y2="18"></line>
-        <line x1="6" y1="6" x2="18" y2="18"></line>
-      </svg>
-    </button>
+    <div class="table-responsive">
+      <table class="env-table">
+        <thead>
+          <tr>
+            <th>变量名 (Key)</th>
+            <th>变量值 (Value)</th>
+            <th width="80">操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          <!-- Rows -->
+        </tbody>
+      </table>
+    </div>
   `;
 
-  // Remove button handler
-  row.querySelector('.btn-remove-env').addEventListener('click', () => {
-    row.remove();
+  const tbody = card.querySelector('tbody');
+  keys.forEach(key => {
+    const val = envObj[key] || '';
+    addEnvGroupTableRow(tbody, key, val);
   });
 
-  // Paste handler for multi-line env variables
-  const keyInput = row.querySelector('.env-key-input');
-  const valInput = row.querySelector('.env-val-input');
+  // Add row button click listener
+  const btnAdd = card.querySelector('.btn-add-group-var');
+  btnAdd.addEventListener('click', () => {
+    let keyPrefix = '';
+    if (groupId !== 'global') {
+      keyPrefix = groupId.toUpperCase().replace(/[^A-Z0-9]/g, '') + '_';
+    }
+    addEnvGroupTableRow(tbody, keyPrefix, '');
 
-  [keyInput, valInput].forEach(input => {
-    input.addEventListener('paste', (e) => {
-      const text = (e.clipboardData || window.clipboardData).getData('text');
-      if (text && text.includes('\n')) {
-        e.preventDefault();
-
-        // Parse multi-line KEY=VALUE format
-        const lines = text.split('\n').filter(line => {
-          const trimmed = line.trim();
-          return trimmed && !trimmed.startsWith('#') && trimmed.includes('=');
-        });
-
-        if (lines.length > 0) {
-          const envList = row.parentElement;
-          const currentIndex = Array.from(envList.children).indexOf(row);
-
-          lines.forEach((line, idx) => {
-            const [k, ...vParts] = line.split('=');
-            const v = vParts.join('='); // Handle values with '=' in them
-
-            if (idx === 0) {
-              // Fill current row
-              keyInput.value = k.trim();
-              valInput.value = v.trim();
-            } else {
-              // Insert new rows after current one
-              const newRow = createEnvRow(k.trim(), v.trim());
-              const insertAfter = envList.children[currentIndex + idx];
-              if (insertAfter) {
-                envList.insertBefore(newRow, insertAfter);
-              } else {
-                // Insert before "Add Variable" button
-                const addButton = document.querySelector('.env-add-row');
-                if (addButton) {
-                  envList.insertBefore(newRow, envList.lastChild);
-                } else {
-                  envList.appendChild(newRow);
-                }
-              }
-            }
-          });
-        }
-      }
-    });
+    // Update badge count
+    const badge = card.querySelector('.badge');
+    const count = tbody.querySelectorAll('tr').length;
+    badge.textContent = `${count} 个变量`;
   });
 
-  return row;
+  container.appendChild(card);
 }
+
+function addEnvGroupTableRow(tbody, key = '', val = '') {
+  const tr = document.createElement('tr');
+  tr.innerHTML = `
+    <td><input type="text" class="env-key-input" value="${key}" placeholder="VARIABLE_NAME" required></td>
+    <td><input type="text" class="env-val-input" value="${val}" placeholder="value"></td>
+    <td>
+      <button type="button" class="btn-icon-danger" onclick="this.closest('tr').remove(); updateEnvGroupCount(this);">&times;</button>
+    </td>
+  `;
+  tbody.appendChild(tr);
+}
+
+window.updateEnvGroupCount = function(btn) {
+  const card = btn.closest('.env-group-card');
+  if (card) {
+    const badge = card.querySelector('.badge');
+    const count = card.querySelectorAll('tbody tr').length;
+    badge.textContent = `${count} 个变量`;
+  }
+}
+
 
 function syncVisualToRaw() {
   let content = '# ===================================================================================\n';
   content += '#                      DOCKER COMPOSE 环境变量配置文件 (.env)\n';
   content += '# ===================================================================================\n\n';
 
-  const rows = document.querySelectorAll('.env-row');
+  const cards = document.querySelectorAll('.env-group-card');
+  cards.forEach(card => {
+    const groupTitle = card.querySelector('.env-group-title').textContent.trim();
+    const rows = card.querySelectorAll('tbody tr');
 
-  rows.forEach(row => {
-    const keyInput = row.querySelector('.env-key-input');
-    const valInput = row.querySelector('.env-val-input');
-    if (keyInput && valInput) {
-      const key = keyInput.value.trim();
-      const val = valInput.value.trim();
-      if (key) {
-        content += `${key}=${val}\n`;
-      }
+    if (rows.length > 0) {
+      content += `# -----------------------------------------------------------------------------------\n`;
+      content += `# ${groupTitle}\n`;
+      content += `# -----------------------------------------------------------------------------------\n`;
+
+      rows.forEach(row => {
+        const keyInput = row.querySelector('.env-key-input');
+        const valInput = row.querySelector('.env-val-input');
+        if (keyInput && valInput) {
+          const key = keyInput.value.trim();
+          const val = valInput.value.trim();
+          if (key) {
+            content += `${key}=${val}\n`;
+          }
+        }
+      });
+      content += `\n`;
     }
   });
 
@@ -1433,8 +1418,13 @@ function parseBulkEnv(text) {
   }
 
   lines.forEach(line => {
-    const trimmed = line.trim();
+    let trimmed = line.trim();
     if (!trimmed || trimmed.startsWith('#')) return;
+
+    // Remove YAML list prefix "- " if present
+    if (trimmed.startsWith('-')) {
+      trimmed = trimmed.substring(1).trim();
+    }
 
     let idx = trimmed.indexOf('=');
     if (idx === -1) {
