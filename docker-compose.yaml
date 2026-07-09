@@ -8,10 +8,14 @@ services:
     build:
       context: ./manager
       dockerfile: Dockerfile
+    image: composemgt-composemgt:latest
     container_name: compose-mgt-dashboard
     restart: always
     ports:
-      - "9988:9988"
+      - "65535:9988"
+    networks:
+      D_Home:
+        ipv4_address: ${SUBNET_PREFIX:-172.18.0}.254
     volumes:
       # 1. 挂载宿主机 Docker Socket 以便管理容器生命周期
       - /var/run/docker.sock:/var/run/docker.sock
@@ -26,3 +30,7 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+networks:
+  D_Home:
+    external: true

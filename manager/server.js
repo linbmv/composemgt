@@ -24,6 +24,10 @@ app.use(express.static(path.join(__dirname, 'public'), {
 const COMPOSE_FILE_PATH = process.env.COMPOSE_FILE_PATH || path.resolve(__dirname, '../data/compose.yml');
 const ENV_FILE_PATH = process.env.ENV_FILE_PATH || path.resolve(__dirname, '../data/.env');
 const WORK_DIR = process.env.WORK_DIR || path.dirname(COMPOSE_FILE_PATH);
+const BASE_SERVICE_NAME = 'composemgt';
+const BASE_SERVICE_IP_SUFFIX = 254;
+const BASE_SERVICE_PUBLISHED_PORT = 65535;
+const BASE_SERVICE_TARGET_PORT = 9988;
 
 // Mock Mode Status (Enables mock mode if Docker is not available in system)
 let isMockMode = false;
@@ -64,11 +68,22 @@ function saveEnvVariables(envObj) {
   fs.writeFileSync(ENV_FILE_PATH, content, 'utf8');
 }
 
+function getCommandEnv() {
+  const envs = getEnvVariables();
+  return {
+    ...process.env,
+    TS_HOST_IP: '100.101.102.100',
+    SUBNET_PREFIX: '172.18.0',
+    TZ: 'Asia/Shanghai',
+    ...envs
+  };
+}
+
 // Run exec command wrapped in Promise
 function runCommand(command) {
   return new Promise((resolve, reject) => {
     // Enforce a 15-second timeout to prevent hanging commands from blocking the backend
-    exec(command, { cwd: WORK_DIR, timeout: 15000 }, (error, stdout, stderr) => {
+    exec(command, { cwd: WORK_DIR, timeout: 15000, env: getCommandEnv() }, (error, stdout, stderr) => {
       if (error) {
         if (error.killed) {
           reject('命令运行超时（15秒限制），已被系统强行终止。请检查该指令是否在等待交互输入，或者包含持续输出/跟踪参数（如 -f ）。\n' + stdout + stderr);
@@ -81,6 +96,297 @@ function runCommand(command) {
       }
     });
   });
+}
+
+function normalizeEnvironment(environment) {
+  if (!environment) return {};
+  if (Array.isArray(environment)) {
+    return environment.reduce((result, item) => {
+      if (typeof item !== 'string') return result;
+      const idx = item.indexOf('=');
+      if (idx === -1) {
+        result[item.trim()] = '';
+      } else {
+        result[item.slice(0, idx).trim()] = item.slice(idx + 1).trim();
+      }
+      return result;
+    }, {});
+  }
+  if (typeof environment === 'object') {
+    return Object.fromEntries(
+      Object.entries(environment).map(([key, value]) => [key, value === null || value === undefined ? '' : String(value)])
+    );
+  }
+  return {};
+}
+
+function normalizeVolumes(volumes) {
+  if (!Array.isArray(volumes)) return [];
+  return volumes.map(volume => {
+    if (typeof volume === 'string') return volume;
+    if (volume && typeof volume === 'object') {
+      if (volume.source && volume.target) return `${volume.source}:${volume.target}`;
+      if (volume.target) return String(volume.target);
+    }
+    return '';
+  }).filter(Boolean);
+}
+
+function normalizeComposePort(port) {
+  if (typeof port === 'number') {
+    return { published: port, target: port };
+  }
+  if (typeof port === 'string') {
+    const withoutProtocol = port.split('/')[0];
+    const parts = withoutProtocol.split(':');
+    if (parts.length >= 2) {
+      return {
+        published: parseInt(parts[parts.length - 2]),
+        target: parseInt(parts[parts.length - 1])
+      };
+    }
+    const singlePort = parseInt(parts[0]);
+    return { published: singlePort, target: singlePort };
+  }
+  if (port && typeof port === 'object') {
+    return {
+      published: port.published ? parseInt(port.published) : undefined,
+      target: port.target ? parseInt(port.target) : undefined
+    };
+  }
+  return {};
+}
+
+function getPublishedPort(port) {
+  if (typeof port === 'object' && port !== null) {
+    return port.published ? parseInt(port.published) : null;
+  }
+  if (typeof port === 'string') {
+    const parts = port.split('/')[0].split(':');
+    if (parts.length >= 2) return parseInt(parts[parts.length - 2]);
+    if (parts.length === 1) return parseInt(parts[0]);
+  }
+  if (typeof port === 'number') return port;
+  return null;
+}
+
+function getBaseServiceValidationError(services) {
+  const entries = Object.entries(services || {});
+  const baseEntryIndex = entries.findIndex(([name]) => name === BASE_SERVICE_NAME);
+  if (baseEntryIndex === -1) {
+    return `基础服务 "${BASE_SERVICE_NAME}" 不存在，请先初始化管理面板服务。`;
+  }
+  if (baseEntryIndex !== 0) {
+    return `基础服务 "${BASE_SERVICE_NAME}" 必须位于 compose.yml 的 services 第一项。`;
+  }
+
+  const baseService = services[BASE_SERVICE_NAME];
+  const baseNetworks = baseService.networks || {};
+  const baseIpSuffix = !Array.isArray(baseNetworks) && baseNetworks.D_Home
+    ? getIpSuffixFromAddress(baseNetworks.D_Home.ipv4_address)
+    : null;
+  if (baseIpSuffix !== BASE_SERVICE_IP_SUFFIX) {
+    return `基础服务 "${BASE_SERVICE_NAME}" 必须使用静态 IP 尾数 .${BASE_SERVICE_IP_SUFFIX}。`;
+  }
+
+  const basePorts = Array.isArray(baseService.ports) ? baseService.ports : [];
+  const hasBasePort = basePorts.some(port => getPublishedPort(port) === BASE_SERVICE_PUBLISHED_PORT);
+  if (!hasBasePort) {
+    return `基础服务 "${BASE_SERVICE_NAME}" 必须占用外部端口 ${BASE_SERVICE_PUBLISHED_PORT}。`;
+  }
+
+  for (const [serviceName, serviceConfig] of entries) {
+    if (serviceName === BASE_SERVICE_NAME) continue;
+    const networks = serviceConfig.networks || {};
+    if (!Array.isArray(networks)) {
+      for (const netConfig of Object.values(networks)) {
+        if (getIpSuffixFromAddress(netConfig?.ipv4_address) === BASE_SERVICE_IP_SUFFIX) {
+          return `静态 IP .${BASE_SERVICE_IP_SUFFIX} 已被服务 "${serviceName}" 占用，无法保留给基础服务。`;
+        }
+      }
+    }
+    if (Array.isArray(serviceConfig.ports)) {
+      for (const port of serviceConfig.ports) {
+        if (getPublishedPort(port) === BASE_SERVICE_PUBLISHED_PORT) {
+          return `外部端口 ${BASE_SERVICE_PUBLISHED_PORT} 已被服务 "${serviceName}" 占用，无法保留给基础服务。`;
+        }
+      }
+    }
+  }
+
+  return '';
+}
+
+async function assertBaseServiceDeployable(services) {
+  const baseServiceError = getBaseServiceValidationError(services);
+  if (baseServiceError) {
+    throw new Error(`${baseServiceError} 请先修复基础服务后再新增其它容器。`);
+  }
+
+  if (isMockMode) return;
+
+  const configuredServices = await runCommand('docker compose config --services');
+  const serviceNames = configuredServices.split('\n').map(line => line.trim()).filter(Boolean);
+  if (!serviceNames.includes(BASE_SERVICE_NAME)) {
+    throw new Error(`docker compose config 未识别到基础服务 "${BASE_SERVICE_NAME}"，请检查 compose.yml。`);
+  }
+
+  await runCommand('docker network inspect D_Home');
+}
+
+function getIpSuffixFromAddress(address) {
+  if (!address) return null;
+  const parts = address.toString().split('.');
+  const suffix = parseInt(parts[parts.length - 1].replace(/\}?$/, '').trim());
+  return Number.isInteger(suffix) ? suffix : null;
+}
+
+function collectComposeUsage(services) {
+  const usedPorts = new Set([BASE_SERVICE_PUBLISHED_PORT]);
+  const usedIpSuffixes = new Set([BASE_SERVICE_IP_SUFFIX]);
+
+  for (const service of Object.values(services || {})) {
+    if (Array.isArray(service.ports)) {
+      service.ports.forEach(port => {
+        const publishedPort = getPublishedPort(port);
+        if (Number.isInteger(publishedPort)) usedPorts.add(publishedPort);
+      });
+    }
+
+    const networks = service.networks || {};
+    if (!Array.isArray(networks)) {
+      Object.values(networks).forEach(netConfig => {
+        if (netConfig && netConfig.ipv4_address) {
+          const suffix = getIpSuffixFromAddress(netConfig.ipv4_address);
+          if (suffix !== null) usedIpSuffixes.add(suffix);
+        }
+      });
+    }
+  }
+
+  return { usedPorts, usedIpSuffixes };
+}
+
+function findAvailableIpSuffix(usedIpSuffixes, preferredSuffix = null) {
+  if (preferredSuffix && preferredSuffix >= 2 && preferredSuffix <= 254 && !usedIpSuffixes.has(preferredSuffix)) {
+    return preferredSuffix;
+  }
+  for (let suffix = 100; suffix <= 254; suffix += 1) {
+    if (!usedIpSuffixes.has(suffix)) return suffix;
+  }
+  for (let suffix = 2; suffix < 100; suffix += 1) {
+    if (!usedIpSuffixes.has(suffix)) return suffix;
+  }
+  return '';
+}
+
+function findAvailablePublishedPort(usedPorts, preferredPort = null, fallbackPort = null) {
+  const candidates = [preferredPort, fallbackPort]
+    .map(port => parseInt(port))
+    .filter(port => Number.isInteger(port) && port >= 100 && port <= 1000);
+
+  for (const port of candidates) {
+    if (!usedPorts.has(port)) return port;
+  }
+
+  for (let port = 100; port <= 1000; port += 1) {
+    if (!usedPorts.has(port)) return port;
+  }
+  return '';
+}
+
+function getServiceSectionComment(index, name, ipSuffix = '') {
+  const suffixLabel = ipSuffix ? ` (${ipSuffix})` : '';
+  return `===================================================================================\n${index}. ${name}${suffixLabel}\n===================================================================================`;
+}
+
+function addServiceSectionComment(yamlText, name, comment) {
+  const commentLines = comment.split('\n').map(line => `  # ${line}`).join('\n');
+  const serviceKeyPattern = new RegExp(`(^\\s{2}${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}:\\n)`, 'm');
+  return yamlText.replace(serviceKeyPattern, `\n${commentLines}\n$1`);
+}
+
+function normalizeBuild(build) {
+  if (!build) return {};
+  if (typeof build === 'string') return { context: build };
+  if (typeof build === 'object') {
+    return {
+      context: build.context || '',
+      dockerfile: build.dockerfile || ''
+    };
+  }
+  return {};
+}
+
+function parsePastedCompose(composeText, existingServices = {}) {
+  const parsed = YAML.parse(composeText);
+  if (!parsed || typeof parsed !== 'object') {
+    throw new Error('未解析到有效的 YAML 对象。');
+  }
+
+  const services = parsed.services && typeof parsed.services === 'object'
+    ? parsed.services
+    : parsed.image || parsed.build || parsed.container_name
+      ? { [parsed.container_name || 'service']: parsed }
+      : null;
+
+  if (!services || Object.keys(services).length === 0) {
+    throw new Error('未找到 services 配置。');
+  }
+
+  const [serviceKey, service] = Object.entries(services)[0];
+  if (!service || typeof service !== 'object') {
+    throw new Error(`服务 "${serviceKey}" 配置无效。`);
+  }
+
+  const ports = Array.isArray(service.ports)
+    ? service.ports.map(normalizeComposePort).filter(port => port.published || port.target)
+    : [];
+  const firstPort = ports[0] || {};
+  const { usedPorts, usedIpSuffixes } = collectComposeUsage(existingServices);
+
+  let networkMode = service.network_mode === 'host' ? 'host' : 'd_home';
+  let ipSuffix = '';
+  const networks = service.networks || {};
+  const dHomeNetwork = Array.isArray(networks)
+    ? null
+    : networks.D_Home || networks.d_home || null;
+  if (dHomeNetwork && dHomeNetwork.ipv4_address) {
+    ipSuffix = getIpSuffixFromAddress(dHomeNetwork.ipv4_address) || '';
+  }
+
+  if (networkMode !== 'host') {
+    ipSuffix = findAvailableIpSuffix(usedIpSuffixes, parseInt(ipSuffix));
+  }
+
+  const publishedPort = networkMode === 'host'
+    ? ''
+    : findAvailablePublishedPort(usedPorts, firstPort.published, firstPort.target);
+
+  const build = normalizeBuild(service.build);
+
+  return {
+    serviceCount: Object.keys(services).length,
+    selectedService: serviceKey,
+    name: serviceKey,
+    containerName: service.container_name || '',
+    deploySource: service.build ? 'build' : 'image',
+    image: service.image || '',
+    buildContext: build.context || '',
+    buildDockerfile: build.dockerfile || '',
+    networkMode,
+    publishedPort,
+    targetPort: firstPort.target || '',
+    ipSuffix,
+    environment: normalizeEnvironment(service.environment),
+    volumes: normalizeVolumes(service.volumes),
+    unsupported: {
+      extraPorts: ports.length > 1 ? ports.slice(1) : [],
+      containerNameDiffers: !!service.container_name && service.container_name !== serviceKey,
+      publishedPortChanged: !!firstPort.published && publishedPort !== firstPort.published,
+      ipSuffixChanged: !!dHomeNetwork?.ipv4_address && ipSuffix !== getIpSuffixFromAddress(dHomeNetwork.ipv4_address)
+    }
+  };
 }
 
 // Initialize Mock State for services parsed from compose.yml
@@ -250,10 +556,42 @@ async function getDockerStatuses() {
 // API Routes
 
 // 1. Get system & docker status
+app.post('/api/compose/parse-service', (req, res) => {
+  try {
+    const { compose } = req.body;
+    if (!compose || typeof compose !== 'string') {
+      return res.status(400).json({ error: '请粘贴有效的 compose.yml 内容。' });
+    }
+
+    const existingServices = fs.existsSync(COMPOSE_FILE_PATH)
+      ? YAML.parse(fs.readFileSync(COMPOSE_FILE_PATH, 'utf8'))?.services || {}
+      : {};
+    const parsed = parsePastedCompose(compose, existingServices);
+    res.json(parsed);
+  } catch (error) {
+    res.status(400).json({ error: `解析 compose 配置失败: ${error.message}` });
+  }
+});
+
 app.get('/api/status', async (req, res) => {
   const envs = getEnvVariables();
+  let baseServiceReady = false;
+  let baseServiceError = '';
+  try {
+    if (fs.existsSync(COMPOSE_FILE_PATH)) {
+      const compose = YAML.parse(fs.readFileSync(COMPOSE_FILE_PATH, 'utf8'));
+      baseServiceError = getBaseServiceValidationError(compose?.services || {});
+      baseServiceReady = !baseServiceError;
+    } else {
+      baseServiceError = 'compose.yml file not found.';
+    }
+  } catch (error) {
+    baseServiceError = error.message;
+  }
   res.json({
     mockMode: isMockMode,
+    baseServiceReady,
+    baseServiceError,
     envs: {
       TS_HOST_IP: envs.TS_HOST_IP || '100.101.102.100',
       SUBNET_PREFIX: envs.SUBNET_PREFIX || '172.18.0'
@@ -539,6 +877,9 @@ app.post('/api/services', async (req, res) => {
     if (!name) {
       return res.status(400).json({ error: '服务标识 (ID) 是必填项。' });
     }
+    if (name === BASE_SERVICE_NAME) {
+      return res.status(400).json({ error: `"${BASE_SERVICE_NAME}" 是系统保留的基础服务，不能通过普通容器表单新增或编辑。` });
+    }
     if (deploySource === 'build') {
       if (!buildContext) {
         return res.status(400).json({ error: '构建上下文路径 (Context) 是必填项。' });
@@ -559,6 +900,12 @@ app.post('/api/services', async (req, res) => {
     const services = doc.get('services')?.toJSON() || {};
     if (services[name] && !isEdit) {
       return res.status(400).json({ error: `服务 ID "${name}" 已经存在。` });
+    }
+
+    try {
+      await assertBaseServiceDeployable(services);
+    } catch (baseError) {
+      return res.status(400).json({ error: baseError.message });
     }
 
     const isHostNet = (networkMode === 'host');
@@ -665,6 +1012,40 @@ app.post('/api/services', async (req, res) => {
     // Add volumes
     if (volumes && volumes.length > 0) {
       newService.volumes = volumes;
+
+      // Create volume directories for relative paths
+      const projectRoot = path.resolve(WORK_DIR, '..');
+      for (const volumeEntry of volumes) {
+        let hostPath = '';
+
+        if (typeof volumeEntry === 'string') {
+          const parts = volumeEntry.split(':');
+          if (parts.length >= 2) {
+            hostPath = parts[0];
+          }
+        }
+
+        // Only process relative paths starting with './'
+        if (hostPath.startsWith('./')) {
+          const relativePath = hostPath.substring(2);
+          const fullPath = path.join(projectRoot, relativePath);
+
+          // For file mounts, create parent directory; for directory mounts, create the directory itself
+          let dirToCreate;
+          if (hostPath.endsWith('/') || !path.extname(fullPath)) {
+            // Likely a directory mount (no extension or ends with /)
+            dirToCreate = fullPath;
+          } else {
+            // File mount, create parent directory
+            dirToCreate = path.dirname(fullPath);
+          }
+
+          if (!fs.existsSync(dirToCreate)) {
+            console.log(`📁 Creating volume directory: ${relativePath}`);
+            fs.mkdirSync(dirToCreate, { recursive: true, mode: 0o755 });
+          }
+        }
+      }
     }
 
     // Add restart and logging options
@@ -677,11 +1058,20 @@ app.post('/api/services', async (req, res) => {
       }
     };
 
-    // Insert service into the document
+    // Insert service into the document. New services are appended to the end;
+    // existing services keep their current position.
     doc.setIn(['services', name], newService);
 
     // Save compose.yml back to disk (preserving other sections, formatting, comments)
-    fs.writeFileSync(COMPOSE_FILE_PATH, doc.toString(), 'utf8');
+    let nextComposeContent = doc.toString();
+    if (!isEdit) {
+      nextComposeContent = addServiceSectionComment(
+        nextComposeContent,
+        name,
+        getServiceSectionComment(Object.keys(services).length + 1, name, isHostNet ? '' : ipSuffix)
+      );
+    }
+    fs.writeFileSync(COMPOSE_FILE_PATH, nextComposeContent, 'utf8');
 
     if (isMockMode) {
       mockState[name] = { state: 'exited', status: 'Created', health: '' };
@@ -697,6 +1087,9 @@ app.post('/api/services', async (req, res) => {
 app.delete('/api/services/:name', async (req, res) => {
   try {
     const { name } = req.params;
+    if (name === BASE_SERVICE_NAME) {
+      return res.status(400).json({ error: `"${BASE_SERVICE_NAME}" 是系统基础服务，不能删除。` });
+    }
     
     if (!fs.existsSync(COMPOSE_FILE_PATH)) {
       return res.status(500).json({ error: 'compose.yml file not found.' });
@@ -1288,6 +1681,115 @@ app.post('/api/webdav/restore', async (req, res) => {
   }
 });
 
+// Initialize required directories and files for fresh deployment
+function initializeEnvironment() {
+  console.log('🔍 Checking environment initialization...');
+
+  // 1. Ensure data directory exists
+  const dataDir = path.dirname(COMPOSE_FILE_PATH);
+  if (!fs.existsSync(dataDir)) {
+    console.log(`📁 Creating data directory: ${dataDir}`);
+    fs.mkdirSync(dataDir, { recursive: true, mode: 0o755 });
+  }
+
+  // 2. Ensure .env file exists with default values
+  if (!fs.existsSync(ENV_FILE_PATH)) {
+    console.log(`📝 Creating default .env file: ${ENV_FILE_PATH}`);
+    const defaultEnv = `# ComposeMgt 默认环境变量配置
+# 此文件在全新部署时自动生成
+
+# Tailscale 主机 IP（用于端口绑定）
+TS_HOST_IP=100.101.102.100
+
+# Docker 网络子网前缀（D_Home 网络使用）
+SUBNET_PREFIX=172.18.0
+
+# 时区设置
+TZ=Asia/Shanghai
+
+# PostgreSQL 配置
+POSTGRES_PASSWORD=your_secure_password_here
+
+# HCA Family 管理密码
+HCA_ADMIN_PASSWORD=admin123
+
+# Grok2API 配置
+LOG_LEVEL=INFO
+SERVER_HOST=0.0.0.0
+SERVER_PORT=8000
+SERVER_WORKERS=1
+ACCOUNT_STORAGE=local
+ACCOUNT_LOCAL_PATH=data/accounts.db
+`;
+    fs.writeFileSync(ENV_FILE_PATH, defaultEnv, { encoding: 'utf8', mode: 0o644 });
+  }
+
+  // 3. Ensure compose.yml exists (should already exist in repo)
+  if (!fs.existsSync(COMPOSE_FILE_PATH)) {
+    console.warn(`⚠️  compose.yml not found at ${COMPOSE_FILE_PATH}`);
+  }
+
+  // 4. Scan compose.yml and create container data directories
+  if (fs.existsSync(COMPOSE_FILE_PATH)) {
+    try {
+      const composeContent = fs.readFileSync(COMPOSE_FILE_PATH, 'utf8');
+      const doc = YAML.parse(composeContent);
+      const services = doc?.services || {};
+
+      const projectRoot = path.resolve(dataDir, '..');
+      const createdDirs = [];
+
+      for (const [serviceName, serviceConfig] of Object.entries(services)) {
+        if (!serviceConfig.volumes) continue;
+
+        for (const volumeEntry of serviceConfig.volumes) {
+          let hostPath = '';
+
+          if (typeof volumeEntry === 'string') {
+            const parts = volumeEntry.split(':');
+            if (parts.length >= 2) {
+              hostPath = parts[0];
+            }
+          } else if (typeof volumeEntry === 'object' && volumeEntry.source) {
+            hostPath = volumeEntry.source;
+          }
+
+          // Only process relative paths starting with './'
+          if (hostPath.startsWith('./')) {
+            // Remove leading './' and resolve relative to project root
+            const relativePath = hostPath.substring(2);
+            const fullPath = path.join(projectRoot, relativePath);
+
+            // For file mounts, create parent directory; for directory mounts, create the directory itself
+            let dirToCreate;
+            if (hostPath.endsWith('/') || !path.extname(fullPath)) {
+              // Likely a directory mount (no extension or ends with /)
+              dirToCreate = fullPath;
+            } else {
+              // File mount, create parent directory
+              dirToCreate = path.dirname(fullPath);
+            }
+
+            if (!fs.existsSync(dirToCreate)) {
+              fs.mkdirSync(dirToCreate, { recursive: true, mode: 0o755 });
+              createdDirs.push(relativePath); // Track created path
+            }
+          }
+        }
+      }
+
+      if (createdDirs.length > 0) {
+        const uniqueDirs = [...new Set(createdDirs)];
+        console.log(`📦 Created container data directories: ${uniqueDirs.join(', ')}`);
+      }
+    } catch (err) {
+      console.error(`⚠️  Failed to scan compose.yml for volume initialization: ${err.message}`);
+    }
+  }
+
+  console.log('✅ Environment initialization complete');
+}
+
 // Automated WebDAV Daily Backup Loop
 let lastBackupDate = '';
 setInterval(async () => {
@@ -1313,6 +1815,10 @@ setInterval(async () => {
 
 // Start Server after checking docker
 const PORT = process.env.PORT || 9988;
+
+// Initialize environment before starting server
+initializeEnvironment();
+
 checkDockerAvailability().then(() => {
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Docker Compose Management Server running at http://localhost:${PORT}`);

@@ -52,6 +52,7 @@ const formAddService = document.getElementById('form-add-service');
 const ipPrefixDisplay = document.getElementById('ip-prefix-display');
 const volumesList = document.getElementById('volumes-list');
 const envList = document.getElementById('env-list');
+const composePasteInput = document.getElementById('srv-compose-paste');
 const modalAddServiceTitle = document.getElementById('modal-add-service-title');
 const btnSubmitAddService = document.getElementById('btn-submit-add-service');
 
@@ -176,6 +177,7 @@ function setupEventListeners() {
     btnSubmitAddService.textContent = '提交创建';
     document.getElementById('srv-name').removeAttribute('readonly');
     formAddService.reset();
+    if (composePasteInput) composePasteInput.value = '';
     
     // Reset network mode selector to default
     const srvNetModeInput = document.getElementById('srv-net-mode');
@@ -272,6 +274,17 @@ function setupEventListeners() {
             addEnvRow(k, parsed[k]);
           });
         }
+      }
+    });
+  }
+
+  if (composePasteInput) {
+    composePasteInput.addEventListener('paste', () => {
+      setTimeout(() => applyPastedCompose(composePasteInput.value), 0);
+    });
+    composePasteInput.addEventListener('blur', () => {
+      if (composePasteInput.value.trim()) {
+        applyPastedCompose(composePasteInput.value);
       }
     });
   }
@@ -473,6 +486,10 @@ async function loadSystemStatus() {
     } else {
       systemModeText.textContent = 'Docker 已连接';
       systemModeText.parentElement.querySelector('.pulse-dot').className = 'pulse-dot status-online';
+    }
+
+    if (!data.baseServiceReady) {
+      showAlert(`基础服务配置异常: ${data.baseServiceError}`, 'error');
     }
   } catch (err) {
     console.error('Failed to load system status:', err);
@@ -783,6 +800,74 @@ function addEnvRow(key = '', val = '') {
     <button type="button" class="btn-icon-danger" onclick="this.parentElement.remove()">&times;</button>
   `;
   envList.appendChild(row);
+}
+
+function splitVolumeMapping(volume) {
+  const lastColonIdx = volume.lastIndexOf(':');
+  if (lastColonIdx === -1) {
+    return { host: volume, container: '' };
+  }
+  return {
+    host: volume.substring(0, lastColonIdx),
+    container: volume.substring(lastColonIdx + 1)
+  };
+}
+
+async function applyPastedCompose(composeText) {
+  const text = composeText.trim();
+  if (!text) return;
+
+  try {
+    const res = await fetch('/api/compose/parse-service', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ compose: text })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+
+    document.getElementById('srv-name').value = data.name || '';
+
+    const toggleBtn = document.querySelector(`.source-toggle[data-source="${data.deploySource || 'image'}"]`);
+    if (toggleBtn) toggleBtn.click();
+    document.getElementById('srv-image').value = data.image || '';
+    document.getElementById('srv-build-context').value = data.buildContext || '';
+    document.getElementById('srv-build-dockerfile').value = data.buildDockerfile || '';
+
+    const netModeInput = document.getElementById('srv-net-mode');
+    netModeInput.value = data.networkMode || 'd_home';
+    handleNetModeChange(netModeInput.value);
+    document.getElementById('srv-pub-port').value = data.publishedPort || '';
+    document.getElementById('srv-tgt-port').value = data.targetPort || '';
+    document.getElementById('srv-ip-suffix').value = data.ipSuffix || '';
+
+    volumesList.innerHTML = '';
+    if (data.volumes && data.volumes.length > 0) {
+      data.volumes.forEach(volume => {
+        const parts = splitVolumeMapping(volume);
+        addVolumeRow(parts.host, parts.container);
+      });
+    } else {
+      addVolumeRow();
+    }
+
+    envList.innerHTML = '';
+    if (data.environment && Object.keys(data.environment).length > 0) {
+      Object.entries(data.environment).forEach(([key, value]) => addEnvRow(key, value));
+    } else {
+      addEnvRow();
+    }
+
+    const notices = [];
+    if (data.serviceCount > 1) notices.push(`检测到 ${data.serviceCount} 个服务，已填入第一个服务 ${data.selectedService}。`);
+    if (data.unsupported?.extraPorts?.length > 0) notices.push('当前表单只支持一个端口映射，已填入第一个端口。');
+    if (data.unsupported?.containerNameDiffers) notices.push('container_name 与服务 ID 不一致，提交后会按服务 ID 写入容器名。');
+    if (data.unsupported?.publishedPortChanged) notices.push(`粘贴的外部端口已被占用，自动改为 ${data.publishedPort}。`);
+    if (data.unsupported?.ipSuffixChanged) notices.push(`粘贴的静态 IP 已被占用，自动改为 .${data.ipSuffix}。`);
+    showAlert(notices.length > 0 ? notices.join(' ') : '已从 compose.yml 配置自动填入表单。', notices.length > 0 ? 'info' : 'success');
+  } catch (err) {
+    showAlert(err.message, 'error');
+  }
 }
 
 async function handleAddServiceSubmit(e) {
@@ -1114,9 +1199,6 @@ function syncVisualToRaw() {
     }
   });
 
-  envRawTextarea.value = content.trim() + '\n';
-}
-  
   envRawTextarea.value = content.trim() + '\n';
 }
 

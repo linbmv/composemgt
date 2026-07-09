@@ -48,7 +48,34 @@ x-defaults:
 services:
 
   # ===================================================================================
-  # 1. cloudflare (100)
+  # 1. composemgt (254)
+  # ===================================================================================
+  composemgt:
+    container_name: compose-mgt-dashboard
+    image: composemgt-composemgt:latest
+    networks:
+      D_Home:
+        ipv4_address: ${SUBNET_PREFIX}.254
+    ports:
+      - target: 9988
+        published: 65535
+        <<: *default-port
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./data:/app/data
+    environment:
+      PORT: "9988"
+      NODE_ENV: production
+      TZ: Asia/Shanghai
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  # ===================================================================================
+  # 2. cloudflare (100)
   # ===================================================================================
   cloudflare:
     container_name: cloudflare
@@ -66,7 +93,7 @@ services:
         max-file: "3"
 
   # ===================================================================================
-  # 2. postgres (101) - 需要特殊用户权限
+  # 3. postgres (101) - 需要特殊用户权限
   # ===================================================================================
   postgres:
     container_name: postgres
