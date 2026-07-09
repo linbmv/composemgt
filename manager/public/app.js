@@ -458,11 +458,45 @@ function showAlert(message, type = 'success') {
   alertBanner.className = `alert-banner ${type}`;
   alertMessage.textContent = message;
   alertBanner.classList.remove('hidden');
-  
+
   // Auto dismiss after 8s
   setTimeout(() => {
     alertBanner.classList.add('hidden');
   }, 8000);
+}
+
+// composemgt is the panel itself; it cannot rebuild/update itself from inside
+// (that would kill the serving process). Clicking「更新面板」copies the host
+// command to the clipboard so the user can run it on the host.
+function showBaseUpdateHelp() {
+  const wd = (systemStatus && systemStatus.workDir) || '<docker主目录>';
+  const cmd = `cd ${wd} && git -C composemgt pull && docker compose up -d --force-recreate --build composemgt`;
+  const show = (copied) => showAlert(
+    (copied ? '✅ 更新命令已复制到剪贴板，请在主机粘贴执行：\n' : 'ℹ️ 面板自身请在主机执行：\n') + cmd
+  );
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(cmd).then(() => show(true)).catch(() => show(false));
+  } else {
+    show(false);
+  }
+}
+
+// One-click background self-update: the backend launches an independent helper
+// container that runs git pull + rebuild after this response returns, so the
+// panel updates itself and comes back automatically.
+async function triggerSelfUpdate() {
+  if (!confirm('将在后台起一个独立容器执行「git pull + 重建面板」，期间面板会短暂中断（约 20-40 秒），完成后自动恢复。\n\n确认更新面板？')) return;
+  try {
+    const res = await fetch('/api/services/composemgt/self-update', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || '启动更新失败');
+    showAlert(data.message || '面板正在后台更新，请约 30 秒后刷新页面。');
+    // 后台会重建面板：延迟自动刷新，等新容器起来
+    setTimeout(() => location.reload(), 35000);
+  } catch (err) {
+    showAlert('后台自更新启动失败，请改用主机命令: ' + err.message, 'error');
+    showBaseUpdateHelp(); // 兜底：把手动命令复制到剪贴板
+  }
 }
 
 // Fetch System Config
@@ -619,43 +653,50 @@ function renderServices() {
       
       <div class="card-actions">
         <div class="action-left">
-          ${isRunning ? 
+          ${service.name === (systemStatus?.baseServiceName || 'composemgt')
+            ? `<span class="text-muted text-sm" title="composemgt 是管理面板自身，生命周期/更新请在主机执行">面板自身</span>`
+            : (isRunning ?
             `<button class="btn btn-secondary btn-xs" onclick="triggerAction('${service.name}', 'stop')" title="停止服务">
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2" ry="2"></rect></svg>
               停止
             </button>
-            <button class="btn btn-secondary btn-xs" onclick="triggerAction('${service.name}', 'restart')" title="重启服务">
+            <button class="btn btn-secondary btn-xs" onclick="triggerAction('${service.name}', 'restart')" title="快速重启：停止并重新启动同一个容器，不改动配置/镜像（改了配置请用「重建」）">
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
               重启
             </button>`
-            : 
+            :
             `<button class="btn btn-primary btn-xs" onclick="triggerAction('${service.name}', 'start')" title="启动服务">
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
               启动
-            </button>`
+            </button>`)
           }
         </div>
         <div class="action-right">
           <button class="btn btn-secondary btn-xs" onclick="showLogsModal('${service.name}')" title="查看容器日志">
             日志
           </button>
-          <button class="btn btn-secondary btn-xs" onclick="showEditModal('${service.name}')" title="编辑服务配置">
+          ${service.name === (systemStatus?.baseServiceName || 'composemgt')
+            ? `<button class="btn btn-primary btn-xs" onclick="triggerSelfUpdate()" title="一键后台更新面板：起一个独立临时容器执行 git pull + 重建，面板短暂中断后自动恢复">
+                🔄 更新面板
+              </button>`
+            : `<button class="btn btn-secondary btn-xs" onclick="showEditModal('${service.name}')" title="编辑服务配置">
             编辑
           </button>
           <button class="btn btn-secondary btn-xs" onclick="triggerAction('${service.name}', 'recreate')" title="${service.deploySource === 'build' ? '使用当前本地源码重新构建镜像并强制重建容器' : '使用当前本地镜像强制重建容器（适用于修改配置后应用变更）'}">
             重建
           </button>
           ${service.deploySource === 'build'
-            ? `<button class="btn btn-primary btn-xs" onclick="triggerAction('${service.name}', 'build-update')" title="在构建目录执行 git pull 拉取最新代码 → 重新构建镜像 → 重建容器">
-                🔄 拉取重建
+            ? `<button class="btn btn-primary btn-xs" onclick="triggerAction('${service.name}', 'build-update')" title="本地构建型更新：在构建目录 git pull 拉取最新代码 → 重新构建镜像 → 重建容器">
+                🔄 更新
               </button>`
-            : `<button class="btn btn-primary btn-xs" onclick="triggerAction('${service.name}', 'pull')" title="从远程镜像仓库拉取最新镜像版本 → 重建容器">
-                🔄 拉取更新
+            : `<button class="btn btn-primary btn-xs" onclick="triggerAction('${service.name}', 'pull')" title="镜像型更新：从镜像仓库拉取最新镜像 → 重建容器">
+                🔄 更新
               </button>`
           }
           <button class="btn btn-danger btn-xs" onclick="showDeleteModal('${service.name}')" title="从编排中删除此服务">
             &times;
-          </button>
+          </button>`
+          }
         </div>
       </div>
     `;

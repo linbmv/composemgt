@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const { exec, spawn } = require('child_process');
 const YAML = require('yaml');
 const dotenv = require('dotenv');
@@ -24,6 +25,10 @@ app.use(express.static(path.join(__dirname, 'public'), {
 const COMPOSE_FILE_PATH = process.env.COMPOSE_FILE_PATH || path.resolve(__dirname, '../data/compose.yml');
 const ENV_FILE_PATH = process.env.ENV_FILE_PATH || path.resolve(__dirname, '../data/.env');
 const WORK_DIR = process.env.WORK_DIR || path.dirname(COMPOSE_FILE_PATH);
+// Persisted panel state (webdav config, custom commands). Kept UNDER WORK_DIR so
+// it survives container rebuilds via the identity mount — NOT under __dirname
+// (that lives inside the image and is wiped on every rebuild).
+const CONFIG_DIR = process.env.CONFIG_DIR || path.join(WORK_DIR, '.composemgt');
 const BASE_SERVICE_NAME = 'composemgt';
 const BASE_SERVICE_IP_SUFFIX = 254;
 const BASE_SERVICE_PUBLISHED_PORT = 65535;
@@ -98,6 +103,73 @@ function runCommand(command) {
   });
 }
 
+// composemgt manages itself. Lifecycle/update commands issued from inside the
+// panel would kill the very process serving the request (docker recreates the
+// container mid-command), and can leave the panel half-recreated. So these are
+// refused for the base service with instructions to run them on the host.
+function baseServiceSelfOpGuard(res, action) {
+  return res.status(400).json({
+    error:
+      `composemgt 是管理面板自身，不能从面板内部「${action}」——这会中断面板进程，可能导致面板无法自动恢复。\n\n` +
+      `请在主机执行（一条命令完成拉取代码 + 重建）：\n` +
+      `  cd ${WORK_DIR} && git -C composemgt pull && docker compose up -d --force-recreate --build composemgt`
+  });
+}
+
+// One-click background self-update for the panel itself.
+//
+// The panel cannot rebuild itself in-process (recreating its own container
+// kills the request). Instead we launch an INDEPENDENT throw-away container via
+// the docker socket, using the panel's own image (which has git + docker
+// compose). That helper sleeps briefly (so the HTTP response flushes), then runs
+// `git pull` + `docker compose up -d --force-recreate --build composemgt`.
+// Being its own container, it survives while composemgt is destroyed/recreated.
+async function launchSelfUpdate() {
+  const cmdEnv = getCommandEnv();
+
+  // Determine the panel's own image (docker sets hostname = container id).
+  const selfId = os.hostname();
+  let imageRef = '';
+  try {
+    imageRef = (await runCommand(`docker inspect --format '{{.Image}}' ${selfId}`)).trim();
+  } catch (e) {
+    throw new Error(`无法确定面板自身镜像（docker inspect ${selfId} 失败）：${e}`);
+  }
+  if (!imageRef) throw new Error('无法确定面板自身镜像（inspect 返回空）。');
+
+  // Write the update script into WORK_DIR (visible to the helper via the same
+  // identity mount composemgt uses). The panel's source is at ./composemgt .
+  const scriptPath = path.join(WORK_DIR, '.composemgt-selfupdate.sh');
+  const logPath = path.join(WORK_DIR, '.composemgt-selfupdate.log');
+  const script = `#!/bin/sh
+sleep 3
+{
+  echo "=== self-update start ==="
+  echo "[1/2] git -C composemgt pull ..."
+  git -C composemgt pull || echo "(git pull skipped/failed; rebuilding with current local code)"
+  echo "[2/2] docker compose up -d --force-recreate --build ${BASE_SERVICE_NAME} ..."
+  docker compose up -d --force-recreate --build ${BASE_SERVICE_NAME}
+  echo "=== self-update done ==="
+} >> "${logPath}" 2>&1
+`;
+  fs.writeFileSync(scriptPath, script, { encoding: 'utf8', mode: 0o755 });
+
+  const runCmd = [
+    'docker run -d --rm',
+    '-v /var/run/docker.sock:/var/run/docker.sock',
+    `-v ${WORK_DIR}:${WORK_DIR}`,
+    `-w ${WORK_DIR}`,
+    `-e SUBNET_PREFIX=${cmdEnv.SUBNET_PREFIX}`,
+    `-e TS_HOST_IP=${cmdEnv.TS_HOST_IP}`,
+    `-e TZ=${cmdEnv.TZ}`,
+    imageRef,
+    `sh ${scriptPath}`
+  ].join(' ');
+
+  const helperId = (await runCommand(runCmd)).trim();
+  return { helperId, imageRef, logPath };
+}
+
 function normalizeEnvironment(environment) {
   if (!environment) return {};
   if (Array.isArray(environment)) {
@@ -130,6 +202,168 @@ function normalizeVolumes(volumes) {
     }
     return '';
   }).filter(Boolean);
+}
+
+// Rewrite a relative host path to the active layout convention:
+//  - include: relative to the container's OWN directory   -> ./data
+//  - legacy:  under ./<name>/ relative to the docker root  -> ./<name>/data
+// Absolute paths and named volumes are returned unchanged.
+function conventionHostPath(hostPath, serviceName, mode) {
+  if (typeof hostPath !== 'string' || !hostPath.startsWith('./')) return hostPath;
+  let rel = hostPath.slice(2).replace(/^\/+/, '');
+  const prefix = serviceName + '/';
+  if (rel === serviceName) rel = '';
+  else if (rel.startsWith(prefix)) rel = rel.slice(prefix.length);
+  if (mode === 'include') return rel ? './' + rel : '.';
+  return rel ? './' + serviceName + '/' + rel : './' + serviceName;
+}
+
+// Apply conventionHostPath to the host side of a "host:container[:mode]" entry.
+function conventionVolumeEntry(entry, serviceName, mode) {
+  if (typeof entry !== 'string') return entry;
+  const idx = entry.indexOf(':');
+  if (idx === -1) return entry;
+  const host = entry.slice(0, idx);
+  const rest = entry.slice(idx);
+  return conventionHostPath(host, serviceName, mode) + rest;
+}
+
+// The three global interpolation variables, copied into each container's own
+// .env so `cd <name> && docker compose up` resolves ${SUBNET_PREFIX} etc.
+function getGlobalInterpolationVars() {
+  const e = getEnvVariables();
+  return {
+    TS_HOST_IP: e.TS_HOST_IP || '100.101.102.100',
+    SUBNET_PREFIX: e.SUBNET_PREFIX || '172.18.0',
+    TZ: e.TZ || 'Asia/Shanghai'
+  };
+}
+
+// Read and merge any env_file(s) declared on a service so the panel can show
+// the values back in the edit form. Paths are resolved relative to WORK_DIR,
+// matching how docker compose resolves them.
+function readEnvFilesForService(service, baseDir) {
+  const result = {};
+  if (!service || !service.env_file) return result;
+  const base = baseDir || WORK_DIR;
+  const files = Array.isArray(service.env_file) ? service.env_file : [service.env_file];
+  for (const f of files) {
+    if (typeof f !== 'string') continue;
+    const p = path.isAbsolute(f) ? f : path.resolve(base, f);
+    try {
+      if (fs.existsSync(p)) {
+        Object.assign(result, dotenv.parse(fs.readFileSync(p, 'utf8')));
+      }
+    } catch (e) {
+      // ignore unreadable env files
+    }
+  }
+  return result;
+}
+
+// ===================================================================================
+//  include-mode helpers
+//  The stack can be laid out two ways:
+//   - legacy:  a single $STACK_DIR/compose.yml with a `services:` block
+//   - include: $STACK_DIR/compose.yml with an `include:` list, plus one
+//              $STACK_DIR/<name>/compose.yml per container (self-contained,
+//              runnable standalone via `cd <name> && docker compose up -d`)
+//  Reads are mode-aware so the panel works in both layouts; writes target the
+//  include layout (falling back to legacy only when no include list exists).
+// ===================================================================================
+
+// Parse the main file's include list into [{ name, file }] (name = first path segment).
+function parseIncludeEntries(includeArr) {
+  if (!Array.isArray(includeArr)) return [];
+  const out = [];
+  for (const entry of includeArr) {
+    let p = null;
+    if (typeof entry === 'string') {
+      p = entry;
+    } else if (entry && typeof entry === 'object') {
+      const raw = entry.path;
+      p = Array.isArray(raw) ? raw[0] : raw;
+    }
+    if (typeof p !== 'string' || !p) continue;
+    const norm = p.replace(/^\.\//, '');
+    const name = norm.split('/')[0];
+    out.push({ name, file: p });
+  }
+  return out;
+}
+
+// Detect the layout mode of the main compose file.
+function getComposeMode() {
+  try {
+    if (!fs.existsSync(COMPOSE_FILE_PATH)) return 'legacy';
+    const doc = YAML.parse(fs.readFileSync(COMPOSE_FILE_PATH, 'utf8'));
+    if (Array.isArray(doc?.include) && doc.include.length > 0) return 'include';
+    return 'legacy';
+  } catch (e) {
+    return 'legacy';
+  }
+}
+
+// Absolute path of a container's own compose file (include layout).
+function serviceComposePath(name) {
+  return path.join(WORK_DIR, name, 'compose.yml');
+}
+
+// Base directory used to resolve a service's relative paths (env_file, volumes):
+//  - include mode: the container's own folder ($STACK_DIR/<name>)
+//  - legacy mode:  WORK_DIR
+function serviceBaseDir(name, mode) {
+  return (mode || getComposeMode()) === 'include' ? path.join(WORK_DIR, name) : WORK_DIR;
+}
+
+// Read every service across the stack, anchor-merge resolved, in declared order.
+// Returns [[name, serviceObj], ...]; each serviceObj carries a non-enumerable
+// __baseDir for downstream relative-path resolution.
+function readAllServiceEntries() {
+  if (!fs.existsSync(COMPOSE_FILE_PATH)) return [];
+  let mainDoc;
+  try {
+    mainDoc = YAML.parse(fs.readFileSync(COMPOSE_FILE_PATH, 'utf8'), { merge: true });
+  } catch (e) {
+    console.warn(`Failed to parse main compose.yml: ${e.message}`);
+    return [];
+  }
+  const entries = [];
+  const tag = (obj, dir) => {
+    if (obj && typeof obj === 'object') {
+      Object.defineProperty(obj, '__baseDir', { value: dir, enumerable: false, configurable: true });
+    }
+  };
+  if (Array.isArray(mainDoc?.include) && mainDoc.include.length > 0) {
+    for (const { file } of parseIncludeEntries(mainDoc.include)) {
+      const abs = path.isAbsolute(file) ? file : path.resolve(WORK_DIR, file);
+      if (!fs.existsSync(abs)) continue;
+      let sub;
+      try {
+        sub = YAML.parse(fs.readFileSync(abs, 'utf8'), { merge: true });
+      } catch (e) {
+        console.warn(`Failed to parse included compose ${file}: ${e.message}`);
+        continue;
+      }
+      for (const [svcName, svcObj] of Object.entries(sub?.services || {})) {
+        tag(svcObj, path.dirname(abs));
+        entries.push([svcName, svcObj]);
+      }
+    }
+  } else {
+    for (const [svcName, svcObj] of Object.entries(mainDoc?.services || {})) {
+      tag(svcObj, WORK_DIR);
+      entries.push([svcName, svcObj]);
+    }
+  }
+  return entries;
+}
+
+// Same data as an ordered plain object { name: serviceObj }.
+function readAllServicesMap() {
+  const map = {};
+  for (const [name, obj] of readAllServiceEntries()) map[name] = obj;
+  return map;
 }
 
 function normalizeComposePort(port) {
@@ -408,17 +642,17 @@ function parseComposeServices() {
     if (!fs.existsSync(COMPOSE_FILE_PATH)) {
       throw new Error('compose.yml not found');
     }
-    const fileContent = fs.readFileSync(COMPOSE_FILE_PATH, 'utf8');
-    const doc = YAML.parse(fileContent);
-    
-    if (!doc || !doc.services) {
+    // Aggregate across include files (or the single legacy services block),
+    // with anchors already merge-resolved.
+    const serviceEntries = readAllServiceEntries();
+    if (serviceEntries.length === 0) {
       return [];
     }
 
     const envs = getEnvVariables();
     const subnetPrefix = envs.SUBNET_PREFIX || '172.18.0';
 
-    return Object.entries(doc.services).map(([name, service]) => {
+    return serviceEntries.map(([name, service]) => {
       // Find IP and Network Mode
       let ip = 'Dynamic';
       let ipSuffix = '';
@@ -481,8 +715,11 @@ function parseComposeServices() {
         ipSuffix,
         ip,
         ports,
-        environment: service.environment || {},
-        volumes: service.volumes || [],
+        // Merge env_file contents (base) with inline environment (override) so
+        // the edit form shows every variable regardless of where it is stored.
+        // env_file is resolved relative to the service's own directory.
+        environment: { ...readEnvFilesForService(service, service.__baseDir), ...normalizeEnvironment(service.environment) },
+        volumes: normalizeVolumes(service.volumes),
         networkMode: service.network_mode === 'host' ? 'host' : 'd_home'
       };
     });
@@ -563,9 +800,7 @@ app.post('/api/compose/parse-service', (req, res) => {
       return res.status(400).json({ error: '请粘贴有效的 compose.yml 内容。' });
     }
 
-    const existingServices = fs.existsSync(COMPOSE_FILE_PATH)
-      ? YAML.parse(fs.readFileSync(COMPOSE_FILE_PATH, 'utf8'))?.services || {}
-      : {};
+    const existingServices = readAllServicesMap();
     const parsed = parsePastedCompose(compose, existingServices);
     res.json(parsed);
   } catch (error) {
@@ -579,8 +814,7 @@ app.get('/api/status', async (req, res) => {
   let baseServiceError = '';
   try {
     if (fs.existsSync(COMPOSE_FILE_PATH)) {
-      const compose = YAML.parse(fs.readFileSync(COMPOSE_FILE_PATH, 'utf8'));
-      baseServiceError = getBaseServiceValidationError(compose?.services || {});
+      baseServiceError = getBaseServiceValidationError(readAllServicesMap());
       baseServiceReady = !baseServiceError;
     } else {
       baseServiceError = 'compose.yml file not found.';
@@ -592,6 +826,8 @@ app.get('/api/status', async (req, res) => {
     mockMode: isMockMode,
     baseServiceReady,
     baseServiceError,
+    baseServiceName: BASE_SERVICE_NAME,
+    workDir: WORK_DIR,
     envs: {
       TS_HOST_IP: envs.TS_HOST_IP || '100.101.102.100',
       SUBNET_PREFIX: envs.SUBNET_PREFIX || '172.18.0'
@@ -650,6 +886,7 @@ app.post('/api/services/:name/start', async (req, res) => {
 app.post('/api/services/:name/stop', async (req, res) => {
   const { name } = req.params;
   console.log(`Stopping service: ${name}`);
+  if (name === BASE_SERVICE_NAME && !isMockMode) return baseServiceSelfOpGuard(res, '停止');
   if (isMockMode) {
     mockState[name] = { state: 'exited', status: 'Exited (0) Just now', health: '' };
     return res.json({ success: true, message: `Mock stopped service ${name}` });
@@ -667,6 +904,7 @@ app.post('/api/services/:name/stop', async (req, res) => {
 app.post('/api/services/:name/restart', async (req, res) => {
   const { name } = req.params;
   console.log(`Restarting service: ${name}`);
+  if (name === BASE_SERVICE_NAME && !isMockMode) return baseServiceSelfOpGuard(res, '重启');
   if (isMockMode) {
     mockState[name] = { state: 'running', status: 'Up 1 second', health: 'healthy' };
     return res.json({ success: true, message: `Mock restarted service ${name}` });
@@ -684,6 +922,7 @@ app.post('/api/services/:name/restart', async (req, res) => {
 app.post('/api/services/:name/recreate', async (req, res) => {
   const { name } = req.params;
   console.log(`Recreating and building service: ${name}`);
+  if (name === BASE_SERVICE_NAME && !isMockMode) return baseServiceSelfOpGuard(res, '重建');
   if (isMockMode) {
     mockState[name] = { state: 'running', status: 'Up 1 second (Rebuilt & Recreated)', health: 'healthy' };
     return res.json({ success: true, message: `Mock rebuilt and recreated service ${name}` });
@@ -701,6 +940,7 @@ app.post('/api/services/:name/recreate', async (req, res) => {
 app.post('/api/services/:name/pull', async (req, res) => {
   const { name } = req.params;
   console.log(`Pulling image and starting service: ${name}`);
+  if (name === BASE_SERVICE_NAME && !isMockMode) return baseServiceSelfOpGuard(res, '更新');
   if (isMockMode) {
     return res.json({ success: true, message: `Mock pulled image for ${name}` });
   }
@@ -714,10 +954,52 @@ app.post('/api/services/:name/pull', async (req, res) => {
   }
 });
 
+// 7b. One-click background self-update (panel updates itself via a helper container)
+app.post('/api/services/:name/self-update', async (req, res) => {
+  const { name } = req.params;
+  if (name !== BASE_SERVICE_NAME) {
+    return res.status(400).json({ error: '该接口仅用于更新管理面板自身 (composemgt)。' });
+  }
+  console.log('Launching background self-update for the panel...');
+  if (isMockMode) {
+    return res.json({ success: true, background: true, message: '[演示模式] 已模拟后台自更新（不会真的重建）。' });
+  }
+  try {
+    const { helperId, logPath } = await launchSelfUpdate();
+    res.json({
+      success: true,
+      background: true,
+      message: `面板正在后台更新（辅助容器 ${helperId.slice(0, 12)}）。约 20-40 秒后自动恢复，请稍候刷新页面。\n更新日志： ${logPath}`
+    });
+  } catch (error) {
+    res.status(500).json({ error: `启动后台自更新失败：${error.toString()}` });
+  }
+});
+
 // 8. Git Pull + Build + Recreate for local build services
+// Find the Git repository root by walking up from a starting directory.
+// The build context is often a subdirectory of the repo (e.g. the context is
+// ./composemgt/manager while .git lives at ./composemgt/.git), so we search
+// ancestors until a .git entry is found or we reach the filesystem root.
+function findGitRoot(startPath) {
+  let dir = path.resolve(startPath);
+  while (true) {
+    if (fs.existsSync(path.join(dir, '.git'))) {
+      return dir;
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) {
+      return null;
+    }
+    dir = parent;
+  }
+}
+
 app.post('/api/services/:name/build-update', async (req, res) => {
   const { name } = req.params;
   console.log(`Git pull and rebuild service: ${name}`);
+
+  if (name === BASE_SERVICE_NAME && !isMockMode) return baseServiceSelfOpGuard(res, '更新');
 
   if (isMockMode) {
     return res.json({
@@ -746,17 +1028,17 @@ app.post('/api/services/:name/build-update', async (req, res) => {
       });
     }
 
-    // Check if it's a git repository
-    const gitDir = path.join(contextPath, '.git');
-    if (!fs.existsSync(gitDir)) {
+    // Find the Git repository root by walking up from the build context.
+    const gitRoot = findGitRoot(contextPath);
+    if (!gitRoot) {
       return res.status(400).json({
-        error: `构建上下文目录 "${contextPath}" 不是一个 Git 仓库（未找到 .git 目录），无法执行 git pull。请确认该目录是通过 git clone 获得的。`
+        error: `构建上下文目录 "${contextPath}" 及其上级目录都不是 Git 仓库（未找到 .git 目录），无法执行 git pull。请确认该项目是通过 git clone 获得的。`
       });
     }
 
-    // Step 1: Run git pull in the build context directory
+    // Step 1: Run git pull in the Git repository root
     const gitOutput = await new Promise((resolve, reject) => {
-      exec('git pull', { cwd: contextPath, timeout: 30000 }, (error, stdout, stderr) => {
+      exec('git pull', { cwd: gitRoot, timeout: 30000 }, (error, stdout, stderr) => {
         if (error) {
           reject(`Git Pull 失败: ${error.message}\n${stderr}`);
         } else {
@@ -770,7 +1052,7 @@ app.post('/api/services/:name/build-update', async (req, res) => {
 
     res.json({
       success: true,
-      output: `=== Git Pull (${service.buildContext}) ===\n${gitOutput}\n\n=== Docker Build & Recreate ===\n${buildOutput}`
+      output: `=== Git Pull (${gitRoot}) ===\n${gitOutput}\n\n=== Docker Build & Recreate ===\n${buildOutput}`
     });
   } catch (error) {
     res.status(500).json({ error: error.toString() });
@@ -894,16 +1176,16 @@ app.post('/api/services', async (req, res) => {
       return res.status(500).json({ error: 'compose.yml file not found.' });
     }
 
-    const fileContent = fs.readFileSync(COMPOSE_FILE_PATH, 'utf8');
-    const doc = YAML.parseDocument(fileContent);
-
-    const services = doc.get('services')?.toJSON() || {};
-    if (services[name] && !isEdit) {
+    const mode = getComposeMode();
+    // Aggregate view of every service across the stack (include files or the
+    // legacy single block), used for duplicate / port / IP conflict checks.
+    const existingServices = readAllServicesMap();
+    if (existingServices[name] && !isEdit) {
       return res.status(400).json({ error: `服务 ID "${name}" 已经存在。` });
     }
 
     try {
-      await assertBaseServiceDeployable(services);
+      await assertBaseServiceDeployable(existingServices);
     } catch (baseError) {
       return res.status(400).json({ error: baseError.message });
     }
@@ -913,7 +1195,7 @@ app.post('/api/services', async (req, res) => {
     // Check port conflict
     if (publishedPort && !isHostNet) {
       const pubPortInt = parseInt(publishedPort);
-      for (const [srvName, srvConfig] of Object.entries(services)) {
+      for (const [srvName, srvConfig] of Object.entries(existingServices)) {
         if (srvName === name) continue;
         if (Array.isArray(srvConfig.ports)) {
           for (const p of srvConfig.ports) {
@@ -940,7 +1222,7 @@ app.post('/api/services', async (req, res) => {
     // Check IP suffix conflict
     if (ipSuffix && !isHostNet) {
       const ipSuffixStr = ipSuffix.toString().trim();
-      for (const [srvName, srvConfig] of Object.entries(services)) {
+      for (const [srvName, srvConfig] of Object.entries(existingServices)) {
         if (srvName === name) continue;
         const networks = srvConfig.networks || {};
         for (const netConfig of Object.values(networks)) {
@@ -1004,44 +1286,90 @@ app.post('/api/services', async (req, res) => {
       }
     }
 
-    // Add env vars
+    // Physical directory holding this container's data/env (same in both modes).
+    const serviceDir = path.join(WORK_DIR, name);
+    // Path string used for relative references inside the compose file:
+    //  - include: relative to the container's own dir  -> ./.env
+    //  - legacy:  under ./<name>/ relative to root      -> ./<name>/.env
+    const envFileRef = mode === 'include' ? './.env' : `./${name}/.env`;
+
+    // Add env vars following the per-container convention:
+    //  - literal values -> written to <name>/.env and referenced via env_file
+    //  - values with $  -> kept inline (env_file is literal; ${VAR} would not
+    //    expand, so interpolated values must stay in the environment: block)
+    // In include mode the container's .env also carries the global interpolation
+    // vars (SUBNET_PREFIX/TS_HOST_IP/TZ) so the container runs standalone.
+    const fileVars = {};
+    const inlineVars = {};
     if (environment && Object.keys(environment).length > 0) {
-      newService.environment = environment;
+      for (const [key, rawVal] of Object.entries(environment)) {
+        const val = rawVal === null || rawVal === undefined ? '' : String(rawVal);
+        if (val.includes('$')) {
+          inlineVars[key] = val;
+        } else {
+          fileVars[key] = val;
+        }
+      }
     }
 
-    // Add volumes
+    const wantEnvFile = mode === 'include'
+      ? true                                   // always: needed for standalone interpolation
+      : Object.keys(fileVars).length > 0;      // legacy: only when there are literal vars
+
+    if (wantEnvFile) {
+      if (!fs.existsSync(serviceDir)) {
+        fs.mkdirSync(serviceDir, { recursive: true, mode: 0o755 });
+      }
+      // include mode: prepend global vars (app vars override on key clash)
+      const merged = mode === 'include'
+        ? { ...getGlobalInterpolationVars(), ...fileVars }
+        : fileVars;
+      const envContent = Object.entries(merged)
+        .map(([k, v]) => `${k}=${v}`)
+        .join('\n') + '\n';
+      fs.writeFileSync(path.join(serviceDir, '.env'), envContent, { encoding: 'utf8', mode: 0o644 });
+      console.log(`📝 Wrote container env file: ${name}/.env (${Object.keys(merged).length} vars)`);
+      newService.env_file = [envFileRef];
+    }
+
+    if (Object.keys(inlineVars).length > 0) {
+      newService.environment = inlineVars;
+    }
+
+    // Add volumes. On create, relocate relative host paths to this container's
+    // convention (include: ./data ; legacy: ./<name>/data). On edit we keep the
+    // stored paths as-is, to avoid repointing a container to a fresh empty dir.
     if (volumes && volumes.length > 0) {
-      newService.volumes = volumes;
+      const finalVolumes = isEdit
+        ? volumes.slice()
+        : volumes.map(v => conventionVolumeEntry(v, name, mode));
+      newService.volumes = finalVolumes;
 
-      // Create volume directories for relative paths
-      const projectRoot = path.resolve(WORK_DIR, '..');
-      for (const volumeEntry of volumes) {
+      // Resolve each relative host path to its physical location and pre-create
+      // it. Physical base differs by mode but the resulting path is the same
+      // ($STACK_DIR/<name>/...).
+      const physBase = mode === 'include' ? serviceDir : WORK_DIR;
+      for (const volumeEntry of finalVolumes) {
         let hostPath = '';
-
         if (typeof volumeEntry === 'string') {
-          const parts = volumeEntry.split(':');
-          if (parts.length >= 2) {
-            hostPath = parts[0];
-          }
+          const idx = volumeEntry.indexOf(':');
+          if (idx !== -1) hostPath = volumeEntry.slice(0, idx);
         }
 
-        // Only process relative paths starting with './'
-        if (hostPath.startsWith('./')) {
-          const relativePath = hostPath.substring(2);
-          const fullPath = path.join(projectRoot, relativePath);
+        // Only pre-create relative paths (absolute/named volumes are left alone)
+        if (hostPath.startsWith('./') || hostPath === '.') {
+          const fullPath = path.resolve(physBase, hostPath);
 
-          // For file mounts, create parent directory; for directory mounts, create the directory itself
+          // File mount → create parent dir; directory mount → create the dir
           let dirToCreate;
           if (hostPath.endsWith('/') || !path.extname(fullPath)) {
-            // Likely a directory mount (no extension or ends with /)
             dirToCreate = fullPath;
           } else {
-            // File mount, create parent directory
             dirToCreate = path.dirname(fullPath);
           }
 
           if (!fs.existsSync(dirToCreate)) {
-            console.log(`📁 Creating volume directory: ${relativePath}`);
+            console.log(`📁 Creating volume directory: ${path.relative(WORK_DIR, dirToCreate)}`);
             fs.mkdirSync(dirToCreate, { recursive: true, mode: 0o755 });
           }
         }
@@ -1058,26 +1386,52 @@ app.post('/api/services', async (req, res) => {
       }
     };
 
-    // Insert service into the document. New services are appended to the end;
-    // existing services keep their current position.
-    doc.setIn(['services', name], newService);
+    if (mode === 'include') {
+      // Write the container's self-contained compose file
+      if (!fs.existsSync(serviceDir)) {
+        fs.mkdirSync(serviceDir, { recursive: true, mode: 0o755 });
+      }
+      const containerDoc = {
+        services: { [name]: newService },
+        networks: { D_Home: { external: true } }
+      };
+      const header = `# ${name} —— 由 ComposeMgt 管理\n`
+        + `# 可单独运行： cd ${name} && docker compose up -d\n`;
+      fs.writeFileSync(serviceComposePath(name), header + YAML.stringify(containerDoc), 'utf8');
 
-    // Save compose.yml back to disk (preserving other sections, formatting, comments)
-    let nextComposeContent = doc.toString();
-    if (!isEdit) {
-      nextComposeContent = addServiceSectionComment(
-        nextComposeContent,
-        name,
-        getServiceSectionComment(Object.keys(services).length + 1, name, isHostNet ? '' : ipSuffix)
-      );
+      // Register in the main include list (append; keep composemgt first)
+      if (!isEdit) {
+        const mainDoc = YAML.parseDocument(fs.readFileSync(COMPOSE_FILE_PATH, 'utf8'));
+        const entryPath = `${name}/compose.yml`;
+        const incNode = mainDoc.get('include');
+        const existingPaths = (incNode && incNode.items ? incNode.items : [])
+          .map(it => String(it.value ?? it));
+        const already = existingPaths.some(p => p === entryPath || p === './' + entryPath);
+        if (!already) {
+          mainDoc.addIn(['include'], entryPath);
+          fs.writeFileSync(COMPOSE_FILE_PATH, mainDoc.toString(), 'utf8');
+        }
+      }
+    } else {
+      // Legacy single-file mode: insert/replace the service in compose.yml
+      const doc = YAML.parseDocument(fs.readFileSync(COMPOSE_FILE_PATH, 'utf8'));
+      doc.setIn(['services', name], newService);
+      let nextComposeContent = doc.toString();
+      if (!isEdit) {
+        nextComposeContent = addServiceSectionComment(
+          nextComposeContent,
+          name,
+          getServiceSectionComment(Object.keys(existingServices).length + 1, name, isHostNet ? '' : ipSuffix)
+        );
+      }
+      fs.writeFileSync(COMPOSE_FILE_PATH, nextComposeContent, 'utf8');
     }
-    fs.writeFileSync(COMPOSE_FILE_PATH, nextComposeContent, 'utf8');
 
     if (isMockMode) {
       mockState[name] = { state: 'exited', status: 'Created', health: '' };
     }
 
-    res.json({ success: true, message: `Successfully added service "${name}" to compose.yml` });
+    res.json({ success: true, message: `Successfully saved service "${name}"` });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -1095,12 +1449,10 @@ app.delete('/api/services/:name', async (req, res) => {
       return res.status(500).json({ error: 'compose.yml file not found.' });
     }
 
-    // Read and parse doc
-    const fileContent = fs.readFileSync(COMPOSE_FILE_PATH, 'utf8');
-    const doc = YAML.parseDocument(fileContent);
-
-    const serviceNode = doc.getIn(['services', name]);
-    if (!serviceNode) {
+    const mode = getComposeMode();
+    const allServicesMap = readAllServicesMap();
+    const serviceObj = allServicesMap[name];
+    if (!serviceObj) {
       return res.status(404).json({ error: `Service "${name}" not found.` });
     }
 
@@ -1113,10 +1465,41 @@ app.delete('/api/services/:name', async (req, res) => {
       }
     }
 
+    if (mode === 'include') {
+      // Remove the include entry from the main file
+      const mainDoc = YAML.parseDocument(fs.readFileSync(COMPOSE_FILE_PATH, 'utf8'));
+      const incNode = mainDoc.get('include');
+      if (incNode && Array.isArray(incNode.items)) {
+        const entryPath = `${name}/compose.yml`;
+        const idx = incNode.items.findIndex(it => {
+          const v = String(it.value ?? it);
+          return v === entryPath || v === './' + entryPath;
+        });
+        if (idx !== -1) {
+          incNode.delete(idx);
+          fs.writeFileSync(COMPOSE_FILE_PATH, mainDoc.toString(), 'utf8');
+        }
+      }
+      // Remove the container's compose file. Its data dir (<name>/) is kept on
+      // purpose so no data is lost; the user can delete it manually if desired.
+      const cfile = serviceComposePath(name);
+      if (fs.existsSync(cfile)) fs.unlinkSync(cfile);
+
+      if (isMockMode) delete mockState[name];
+      return res.json({ success: true, message: `已从编排移除 "${name}"（数据目录 ${name}/ 已保留）。` });
+    }
+
+    // ---- legacy single-file mode ----
+    const doc = YAML.parseDocument(fs.readFileSync(COMPOSE_FILE_PATH, 'utf8'));
+    const serviceNode = doc.getIn(['services', name]);
+    if (!serviceNode) {
+      return res.status(404).json({ error: `Service "${name}" not found.` });
+    }
+
     // Clean up .env variables uniquely referenced by this service
     try {
-      const serviceObj = serviceNode.toJSON();
-      const serviceStr = JSON.stringify(serviceObj);
+      const serviceObjJson = serviceNode.toJSON();
+      const serviceStr = JSON.stringify(serviceObjJson);
       const regex = /\$\{?([A-Z0-9_]+)\}?/g;
       const referencedVars = new Set();
       let match;
@@ -1344,7 +1727,7 @@ app.post('/api/terminal/run', async (req, res) => {
   }
 });
 
-const CUSTOM_CMDS_PATH = path.resolve(__dirname, 'custom_commands.json');
+const CUSTOM_CMDS_PATH = path.join(CONFIG_DIR, 'custom_commands.json');
 const DEFAULT_COMMANDS = [
   { name: '状态监控 (stats)', cmd: 'docker stats --no-stream' },
   { name: '磁盘占用 (df)', cmd: 'docker system df' },
@@ -1394,7 +1777,7 @@ app.post('/api/terminal/commands', (req, res) => {
   }
 });
 
-const WEBDAV_CONFIG_PATH = path.resolve(__dirname, 'webdav_config.json');
+const WEBDAV_CONFIG_PATH = path.join(CONFIG_DIR, 'webdav_config.json');
 
 function getWebDavConfig() {
   if (!fs.existsSync(WEBDAV_CONFIG_PATH)) {
@@ -1553,6 +1936,7 @@ app.post('/api/webdav/config', (req, res) => {
       return res.status(400).json({ error: '所有 WebDAV 配置项均为必填项。' });
     }
     const config = { url, username, password, directory: directory || '/composemgt_backups', autoBackup: !!autoBackup };
+    if (!fs.existsSync(CONFIG_DIR)) fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o755 });
     fs.writeFileSync(WEBDAV_CONFIG_PATH, JSON.stringify(config, null, 2), 'utf8');
     res.json({ success: true });
   } catch (error) {
@@ -1681,9 +2065,47 @@ app.post('/api/webdav/restore', async (req, res) => {
   }
 });
 
+// Ensure the persisted config dir exists and, on first run, seed each config
+// file from older locations so existing settings/defaults are not lost:
+//   1) previous host-mounted file at $WORK_DIR/composemgt/<file>
+//   2) the default baked into the image at <manager>/<file>
+function ensurePersistedConfig() {
+  try {
+    if (!fs.existsSync(CONFIG_DIR)) {
+      fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o755 });
+      console.log(`📁 Created panel config dir: ${CONFIG_DIR}`);
+    }
+    const seed = (fileName, dest) => {
+      if (fs.existsSync(dest)) return;
+      const candidates = [
+        path.join(WORK_DIR, 'composemgt', fileName),
+        path.resolve(__dirname, fileName)
+      ];
+      for (const c of candidates) {
+        try {
+          if (fs.existsSync(c) && fs.statSync(c).isFile()) {
+            fs.copyFileSync(c, dest);
+            console.log(`📋 Seeded ${fileName} into config dir from ${c}`);
+            return;
+          }
+        } catch (e) { /* ignore and try next */ }
+      }
+    };
+    seed('webdav_config.json', WEBDAV_CONFIG_PATH);
+    seed('custom_commands.json', CUSTOM_CMDS_PATH);
+  } catch (e) {
+    console.error('⚠️  Failed to prepare persisted config dir:', e.message);
+  }
+}
+
 // Initialize required directories and files for fresh deployment
 function initializeEnvironment() {
   console.log('🔍 Checking environment initialization...');
+
+  // 0. Ensure the persisted config dir exists and seed it from older locations
+  //    (baked image defaults / previous host-mounted files) so webdav config and
+  //    custom commands survive container rebuilds.
+  ensurePersistedConfig();
 
   // 1. Ensure data directory exists
   const dataDir = path.dirname(COMPOSE_FILE_PATH);
@@ -1695,6 +2117,8 @@ function initializeEnvironment() {
   // 2. Ensure .env file exists with default values
   if (!fs.existsSync(ENV_FILE_PATH)) {
     console.log(`📝 Creating default .env file: ${ENV_FILE_PATH}`);
+    const envDir = path.dirname(ENV_FILE_PATH);
+    if (!fs.existsSync(envDir)) fs.mkdirSync(envDir, { recursive: true, mode: 0o755 });
     const defaultEnv = `# ComposeMgt 默认环境变量配置
 # 此文件在全新部署时自动生成
 
@@ -1729,17 +2153,35 @@ ACCOUNT_LOCAL_PATH=data/accounts.db
     console.warn(`⚠️  compose.yml not found at ${COMPOSE_FILE_PATH}`);
   }
 
-  // 4. Scan compose.yml and create container data directories
+  // 4. Scan the stack (include files or legacy single block) and create each
+  //    container's data directories + env_file placeholders. Relative paths are
+  //    resolved against each service's own base directory.
   if (fs.existsSync(COMPOSE_FILE_PATH)) {
     try {
-      const composeContent = fs.readFileSync(COMPOSE_FILE_PATH, 'utf8');
-      const doc = YAML.parse(composeContent);
-      const services = doc?.services || {};
-
-      const projectRoot = path.resolve(dataDir, '..');
+      const serviceEntries = readAllServiceEntries();
       const createdDirs = [];
 
-      for (const [serviceName, serviceConfig] of Object.entries(services)) {
+      for (const [serviceName, serviceConfig] of serviceEntries) {
+        const baseDir = serviceConfig.__baseDir || dataDir;
+
+        // Ensure any env_file referenced by the service exists. docker compose
+        // fails to start if an env_file is missing, so on a fresh deploy we
+        // create an empty placeholder (under the service's own directory).
+        if (serviceConfig.env_file) {
+          const envFiles = Array.isArray(serviceConfig.env_file)
+            ? serviceConfig.env_file
+            : [serviceConfig.env_file];
+          for (const ef of envFiles) {
+            if (typeof ef !== 'string' || !ef.startsWith('./')) continue;
+            const fullEnv = path.resolve(baseDir, ef);
+            if (!fs.existsSync(fullEnv)) {
+              fs.mkdirSync(path.dirname(fullEnv), { recursive: true, mode: 0o755 });
+              fs.writeFileSync(fullEnv, '', { encoding: 'utf8', mode: 0o644 });
+              createdDirs.push(path.relative(WORK_DIR, fullEnv));
+            }
+          }
+        }
+
         if (!serviceConfig.volumes) continue;
 
         for (const volumeEntry of serviceConfig.volumes) {
@@ -1756,9 +2198,7 @@ ACCOUNT_LOCAL_PATH=data/accounts.db
 
           // Only process relative paths starting with './'
           if (hostPath.startsWith('./')) {
-            // Remove leading './' and resolve relative to project root
-            const relativePath = hostPath.substring(2);
-            const fullPath = path.join(projectRoot, relativePath);
+            const fullPath = path.resolve(baseDir, hostPath);
 
             // For file mounts, create parent directory; for directory mounts, create the directory itself
             let dirToCreate;
@@ -1772,7 +2212,7 @@ ACCOUNT_LOCAL_PATH=data/accounts.db
 
             if (!fs.existsSync(dirToCreate)) {
               fs.mkdirSync(dirToCreate, { recursive: true, mode: 0o755 });
-              createdDirs.push(relativePath); // Track created path
+              createdDirs.push(path.relative(WORK_DIR, dirToCreate)); // Track created path
             }
           }
         }

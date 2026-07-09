@@ -1,7 +1,7 @@
 FROM node:20-alpine
 
-# 安装 Docker 客户端及 Docker Compose 插件，以便在容器内调用宿主机 Docker 命令
-RUN apk add --no-cache docker-cli docker-cli-compose
+# 安装 Docker 客户端、Docker Compose 插件及 git（build 型容器「更新」需要 git pull）
+RUN apk add --no-cache docker-cli docker-cli-compose git
 
 WORKDIR /app/manager
 
