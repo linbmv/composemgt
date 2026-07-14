@@ -637,7 +637,9 @@ function parsePastedCompose(composeText, existingServices = {}) {
       containerNameDiffers: !!service.container_name && service.container_name !== serviceKey,
       publishedPortChanged: !!firstPort.published && publishedPort !== firstPort.published,
       ipSuffixChanged: !!dHomeNetwork?.ipv4_address && ipSuffix !== getIpSuffixFromAddress(dHomeNetwork.ipv4_address)
-    }
+    },
+    // 方案 C：保留原始 service 对象（用于透传面板不管理的字段）
+    __rawService: service
   };
 }
 
@@ -1435,6 +1437,30 @@ app.post('/api/services', async (req, res) => {
       }
     }
     // ========== 方案 A 结束 ==========
+
+    // ========== 方案 C：粘贴创建时保留原始 compose 的所有字段 ==========
+    // 用户粘贴完整 compose（带 init/security_opt 等高级字段）→ 面板提取填表
+    // → 提交时把原 YAML 里面板不管理的字段也一并透传到 newService
+    if (!isEdit && req.body.compose) {
+      try {
+        const parsed = parsePastedCompose(req.body.compose, existingServices);
+        if (parsed.__rawService && typeof parsed.__rawService === 'object') {
+          const managedKeys = new Set([
+            'container_name', 'image', 'build', 'network_mode', 'networks', 'ports',
+            'env_file', 'environment', 'volumes', 'restart', 'logging'
+          ]);
+          for (const [key, value] of Object.entries(parsed.__rawService)) {
+            if (!managedKeys.has(key) && !(key in newService)) {
+              newService[key] = value;
+              console.log(`📋 透传粘贴的字段: ${name}.${key}`);
+            }
+          }
+        }
+      } catch (e) {
+        console.warn(`⚠️  无法解析粘贴的 compose 以透传字段: ${e.message}`);
+      }
+    }
+    // ========== 方案 C 结束 ==========
 
     if (mode === 'include') {
       // Write the container's self-contained compose file
