@@ -1404,6 +1404,38 @@ app.post('/api/services', async (req, res) => {
       }
     };
 
+    // ========== 方案 A：编辑时保留面板不管理的字段 ==========
+    // 面板管理的字段（会被上面 newService 覆盖）：
+    //   container_name, image, build, network_mode, networks, ports,
+    //   env_file, environment, volumes, restart, logging
+    // 面板不管理、应保留的字段（Docker 运行时选项）：
+    //   init, stop_grace_period, stop_signal, security_opt, cap_add, cap_drop,
+    //   privileged, devices, sysctls, ulimits, healthcheck, depends_on, labels, etc.
+    if (isEdit && mode === 'include') {
+      const existingPath = serviceComposePath(name);
+      if (fs.existsSync(existingPath)) {
+        try {
+          const existingDoc = YAML.parse(fs.readFileSync(existingPath, 'utf8'), { merge: true });
+          const existingSvc = existingDoc?.services?.[name];
+          if (existingSvc && typeof existingSvc === 'object') {
+            const managedKeys = new Set([
+              'container_name', 'image', 'build', 'network_mode', 'networks', 'ports',
+              'env_file', 'environment', 'volumes', 'restart', 'logging'
+            ]);
+            for (const [key, value] of Object.entries(existingSvc)) {
+              if (!managedKeys.has(key) && !(key in newService)) {
+                newService[key] = value;
+                console.log(`♻️  保留用户自定义字段: ${name}.${key}`);
+              }
+            }
+          }
+        } catch (e) {
+          console.warn(`⚠️  无法读取现有 compose 文件以保留字段: ${e.message}`);
+        }
+      }
+    }
+    // ========== 方案 A 结束 ==========
+
     if (mode === 'include') {
       // Write the container's self-contained compose file
       if (!fs.existsSync(serviceDir)) {
