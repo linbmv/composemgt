@@ -228,6 +228,63 @@ function conventionVolumeEntry(entry, serviceName, mode) {
   return conventionHostPath(host, serviceName, mode) + rest;
 }
 
+// Resolve a volume host-path string to a physical path suitable for pre-creation.
+// Handles three real-world shapes found in production compose files:
+//  1. Plain relative:   ./data              -> baseDir/data
+//  2. Variable default: ${FOO:-./config.yaml} -> baseDir/config.yaml  (extract default)
+//  3. Bare variable:    ${FOO}              -> null (can't know the path, skip)
+// Absolute paths, named volumes, and unresolvable expressions return null so the
+// caller knows to skip creation.
+function resolveHostPathForCreation(hostPath, baseDir) {
+  if (typeof hostPath !== 'string' || !hostPath) return null;
+  let effective = hostPath;
+  // Extract default from ${VAR:-default} / ${VAR-default} at any position.
+  const defaultMatch = effective.match(/^\$\{[^:}]+:?-([^}]+)\}(.*)$/);
+  if (defaultMatch) {
+    effective = defaultMatch[1] + defaultMatch[2];
+  } else if (effective.startsWith('${')) {
+    // Bare ${VAR} with no default — cannot predict path.
+    return null;
+  }
+  // Now `effective` should be a real path expression.
+  if (effective === '.' || effective.startsWith('./') || effective.startsWith('../')) {
+    return path.resolve(baseDir, effective);
+  }
+  if (path.isAbsolute(effective)) {
+    return effective;
+  }
+  // Bare name like "myvolume" — a named volume, don't create.
+  return null;
+}
+
+// Given a resolved host path and the original path string (with trailing slash
+// / extension hints), pre-create it as directory or empty file.
+//  - Trailing slash or no extension -> directory mount
+//  - Has file extension -> file mount (create parent dir + empty placeholder)
+// The file placeholder matters: without it docker would create a DIRECTORY at
+// that path (matching the container target type is Docker's own guess), which
+// then makes the container fail to read what it expected as a file.
+function ensureHostPathExists(fullPath, hostPathHint) {
+  const looksLikeDir = hostPathHint.endsWith('/') || !path.extname(fullPath);
+  if (looksLikeDir) {
+    if (!fs.existsSync(fullPath)) {
+      fs.mkdirSync(fullPath, { recursive: true, mode: 0o755 });
+      return { created: true, kind: 'dir', path: fullPath };
+    }
+    return { created: false, kind: 'dir', path: fullPath };
+  }
+  // File mount: create parent dir, then create empty file if absent.
+  const parent = path.dirname(fullPath);
+  if (!fs.existsSync(parent)) {
+    fs.mkdirSync(parent, { recursive: true, mode: 0o755 });
+  }
+  if (!fs.existsSync(fullPath)) {
+    fs.writeFileSync(fullPath, '', { encoding: 'utf8', mode: 0o644 });
+    return { created: true, kind: 'file', path: fullPath };
+  }
+  return { created: false, kind: 'file', path: fullPath };
+}
+
 // Detect bare named-volume sources (e.g. "grok2api-data" in
 // "grok2api-data:/app/data"). These MUST be declared in the top-level volumes:
 // section or docker compose rejects the project ("refers to undefined volume").
@@ -1376,21 +1433,41 @@ app.post('/api/services', async (req, res) => {
           if (idx !== -1) hostPath = volumeEntry.slice(0, idx);
         }
 
+        // Extract the physical path from ${VAR:-default} interpolation so we can
+        // pre-create it. Docker resolves ${VAR:-./default} at runtime; when VAR
+        // is unset it uses the default. If the whole entry is just a bare
+        // ${VAR}, we can't guess the target and skip.
+        let resolvedHost = hostPath;
+        const interpMatch = /^\$\{[^:{}]+:-([^}]+)\}$/.exec(hostPath);
+        if (interpMatch) resolvedHost = interpMatch[1];
+
         // Only pre-create relative paths (absolute/named volumes are left alone)
-        if (hostPath.startsWith('./') || hostPath === '.') {
-          const fullPath = path.resolve(physBase, hostPath);
+        if (resolvedHost.startsWith('./') || resolvedHost === '.') {
+          const fullPath = path.resolve(physBase, resolvedHost);
 
-          // File mount → create parent dir; directory mount → create the dir
-          let dirToCreate;
-          if (hostPath.endsWith('/') || !path.extname(fullPath)) {
-            dirToCreate = fullPath;
+          // Treat as file mount only when the path has a file extension AND
+          // doesn't end with '/'. Otherwise create a directory.
+          const isFileMount = !resolvedHost.endsWith('/') && !!path.extname(fullPath);
+
+          if (isFileMount) {
+            // File mount → ensure parent dir exists AND touch the file so
+            // Docker doesn't auto-create a directory of that name at bind time
+            // (which would then make the container see a dir instead of a file).
+            const parentDir = path.dirname(fullPath);
+            if (!fs.existsSync(parentDir)) {
+              console.log(`📁 Creating parent dir: ${path.relative(WORK_DIR, parentDir)}`);
+              fs.mkdirSync(parentDir, { recursive: true, mode: 0o755 });
+            }
+            if (!fs.existsSync(fullPath)) {
+              console.log(`📄 Creating empty mount file: ${path.relative(WORK_DIR, fullPath)}`);
+              fs.writeFileSync(fullPath, '', { encoding: 'utf8', mode: 0o644 });
+            }
           } else {
-            dirToCreate = path.dirname(fullPath);
-          }
-
-          if (!fs.existsSync(dirToCreate)) {
-            console.log(`📁 Creating volume directory: ${path.relative(WORK_DIR, dirToCreate)}`);
-            fs.mkdirSync(dirToCreate, { recursive: true, mode: 0o755 });
+            // Directory mount
+            if (!fs.existsSync(fullPath)) {
+              console.log(`📁 Creating volume directory: ${path.relative(WORK_DIR, fullPath)}`);
+              fs.mkdirSync(fullPath, { recursive: true, mode: 0o755 });
+            }
           }
         }
       }
@@ -2258,8 +2335,10 @@ ACCOUNT_LOCAL_PATH=data/accounts.db
             ? serviceConfig.env_file
             : [serviceConfig.env_file];
           for (const ef of envFiles) {
-            if (typeof ef !== 'string' || !ef.startsWith('./')) continue;
-            const fullEnv = path.resolve(baseDir, ef);
+            if (typeof ef !== 'string') continue;
+            const resolved = resolveHostPathForCreation(ef);
+            if (!resolved || !resolved.startsWith('./')) continue;
+            const fullEnv = path.resolve(baseDir, resolved);
             if (!fs.existsSync(fullEnv)) {
               fs.mkdirSync(path.dirname(fullEnv), { recursive: true, mode: 0o755 });
               fs.writeFileSync(fullEnv, '', { encoding: 'utf8', mode: 0o644 });
@@ -2282,11 +2361,32 @@ ACCOUNT_LOCAL_PATH=data/accounts.db
             hostPath = volumeEntry.source;
           }
 
+          // Expand ${VAR:-default} to extract the default path for creation.
+          hostPath = resolveHostPathForCreation(hostPath);
+
           // Only process relative paths starting with './'
           if (hostPath.startsWith('./')) {
             const fullPath = path.resolve(baseDir, hostPath);
 
-            // For file mounts, create parent directory; for directory mounts, create the directory itself
+            // Determine if it's a file mount or directory mount.
+            const looksLikeFile = !hostPath.endsWith('/') && !!path.extname(fullPath);
+
+            if (looksLikeFile) {
+              // File mount: create parent dir + empty file placeholder.
+              // Without the file, docker will create a directory at that path,
+              // and the container will fail to read config as a file.
+              const parentDir = path.dirname(fullPath);
+              if (!fs.existsSync(parentDir)) {
+                fs.mkdirSync(parentDir, { recursive: true, mode: 0o755 });
+              }
+              if (!fs.existsSync(fullPath)) {
+                fs.writeFileSync(fullPath, '', { encoding: 'utf8', mode: 0o644 });
+                createdDirs.push(path.relative(WORK_DIR, fullPath));
+              }
+              continue;
+            }
+
+            // Directory mount: create the directory itself.
             let dirToCreate;
             if (hostPath.endsWith('/') || !path.extname(fullPath)) {
               // Likely a directory mount (no extension or ends with /)
