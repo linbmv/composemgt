@@ -1,0 +1,12 @@
+{
+  "id": "full-project-review",
+  "title": "全面审核项目稳定性、功能完整性和代码质量",
+  "status": "in_progress",
+  "strategy": "review-audit",
+  "currentPhase": "1",
+  "nextAction": "双模型并行审查：稳定性、功能、代码质量、安全",
+  "gate": null,
+  "branch": "main",
+  "scope": "full-project-review",
+  "createdAt": "2026-07-14T00:00:00Z"
+}
