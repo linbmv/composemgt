@@ -228,6 +228,24 @@ function conventionVolumeEntry(entry, serviceName, mode) {
   return conventionHostPath(host, serviceName, mode) + rest;
 }
 
+// Detect bare named-volume sources (e.g. "grok2api-data" in
+// "grok2api-data:/app/data"). These MUST be declared in the top-level volumes:
+// section or docker compose rejects the project ("refers to undefined volume").
+// Bind mounts (/abs, ./rel, ../rel, ~) and ${VAR} interpolations are NOT named
+// volumes and are skipped.
+function extractNamedVolumes(volumes) {
+  const names = [];
+  if (!Array.isArray(volumes)) return names;
+  for (const v of volumes) {
+    if (typeof v !== 'string') continue;
+    const idx = v.indexOf(':');
+    if (idx <= 0) continue; // anonymous volume or no source
+    const src = v.slice(0, idx);
+    if (/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(src)) names.push(src);
+  }
+  return names;
+}
+
 // The three global interpolation variables, copied into each container's own
 // .env so `cd <name> && docker compose up` resolves ${SUBNET_PREFIX} etc.
 function getGlobalInterpolationVars() {
@@ -1395,6 +1413,12 @@ app.post('/api/services', async (req, res) => {
         services: { [name]: newService },
         networks: { D_Home: { external: true } }
       };
+      // Declare any named volumes so the self-contained file is valid on its own.
+      const namedVols = extractNamedVolumes(newService.volumes || []);
+      if (namedVols.length > 0) {
+        containerDoc.volumes = {};
+        for (const nv of namedVols) containerDoc.volumes[nv] = null;
+      }
       const header = `# ${name} —— 由 ComposeMgt 管理\n`
         + `# 可单独运行： cd ${name} && docker compose up -d\n`;
       fs.writeFileSync(serviceComposePath(name), header + YAML.stringify(containerDoc), 'utf8');
@@ -1416,6 +1440,10 @@ app.post('/api/services', async (req, res) => {
       // Legacy single-file mode: insert/replace the service in compose.yml
       const doc = YAML.parseDocument(fs.readFileSync(COMPOSE_FILE_PATH, 'utf8'));
       doc.setIn(['services', name], newService);
+      // Declare any named volumes at the top level, else compose rejects the file.
+      for (const nv of extractNamedVolumes(newService.volumes || [])) {
+        if (!doc.hasIn(['volumes', nv])) doc.setIn(['volumes', nv], null);
+      }
       let nextComposeContent = doc.toString();
       if (!isEdit) {
         nextComposeContent = addServiceSectionComment(
