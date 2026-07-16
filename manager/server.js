@@ -197,7 +197,9 @@ function normalizeVolumes(volumes) {
   return volumes.map(volume => {
     if (typeof volume === 'string') return volume;
     if (volume && typeof volume === 'object') {
-      if (volume.source && volume.target) return `${volume.source}:${volume.target}`;
+      if (volume.source && volume.target) {
+        return `${volume.source}:${volume.target}${volume.read_only ? ':ro' : ''}`;
+      }
       if (volume.target) return String(volume.target);
     }
     return '';
@@ -218,14 +220,74 @@ function conventionHostPath(hostPath, serviceName, mode) {
   return rel ? './' + serviceName + '/' + rel : './' + serviceName;
 }
 
+// Split short volume syntax at the first colon outside a ${...} expression.
+// A plain split/indexOf breaks values such as
+// ${GROK2API_CONFIG:-./config.yaml}:/run/grok2api/config.yaml:ro.
+function splitVolumeEntry(entry) {
+  if (typeof entry !== 'string') return { source: '', targetAndMode: '', hasTarget: false };
+  let interpolationDepth = 0;
+  for (let i = 0; i < entry.length; i += 1) {
+    if (entry[i] === '$' && entry[i + 1] === '{') {
+      interpolationDepth += 1;
+      i += 1;
+      continue;
+    }
+    if (entry[i] === '}' && interpolationDepth > 0) {
+      interpolationDepth -= 1;
+      continue;
+    }
+    if (entry[i] === ':' && interpolationDepth === 0) {
+      return {
+        source: entry.slice(0, i),
+        targetAndMode: entry.slice(i + 1),
+        hasTarget: true
+      };
+    }
+  }
+  return { source: entry, targetAndMode: '', hasTarget: false };
+}
+
+function effectiveVolumeSource(source, interpolationEnv = {}) {
+  if (typeof source !== 'string' || !source) return null;
+  const variableMatch = source.match(/^\$\{([A-Za-z_][A-Za-z0-9_]*)(?:(:-|-)([^}]*))?\}(.*)$/);
+  if (variableMatch) {
+    const [, name, operator, defaultValue = '', suffix] = variableMatch;
+    const hasValue = Object.prototype.hasOwnProperty.call(interpolationEnv, name);
+    const value = hasValue ? String(interpolationEnv[name]) : '';
+    if (!operator) return hasValue ? value + suffix : null;
+    if (operator === ':-') return (hasValue && value !== '' ? value : defaultValue) + suffix;
+    return (hasValue ? value : defaultValue) + suffix;
+  }
+  if (source.startsWith('${')) return null;
+  return source;
+}
+
+function getVolumeInterpolationEnv(baseDir) {
+  let localEnv = {};
+  try {
+    const localEnvPath = path.join(baseDir, '.env');
+    if (fs.existsSync(localEnvPath)) {
+      localEnv = dotenv.parse(fs.readFileSync(localEnvPath, 'utf8'));
+    }
+  } catch (error) {
+    console.warn(`Failed to read interpolation env from ${baseDir}: ${error.message}`);
+  }
+  return { ...getCommandEnv(), ...localEnv };
+}
+
+function isReadOnlyVolumeTarget(targetAndMode) {
+  if (typeof targetAndMode !== 'string') return false;
+  const lastColon = targetAndMode.lastIndexOf(':');
+  if (lastColon === -1) return false;
+  return targetAndMode.slice(lastColon + 1).split(',').includes('ro');
+}
+
 // Apply conventionHostPath to the host side of a "host:container[:mode]" entry.
 function conventionVolumeEntry(entry, serviceName, mode) {
   if (typeof entry !== 'string') return entry;
-  const idx = entry.indexOf(':');
-  if (idx === -1) return entry;
-  const host = entry.slice(0, idx);
-  const rest = entry.slice(idx);
-  return conventionHostPath(host, serviceName, mode) + rest;
+  const parsed = splitVolumeEntry(entry);
+  if (!parsed.hasTarget) return entry;
+  return `${conventionHostPath(parsed.source, serviceName, mode)}:${parsed.targetAndMode}`;
 }
 
 // Resolve a volume host-path string to a physical path suitable for pre-creation.
@@ -233,19 +295,12 @@ function conventionVolumeEntry(entry, serviceName, mode) {
 //  1. Plain relative:   ./data              -> baseDir/data
 //  2. Variable default: ${FOO:-./config.yaml} -> baseDir/config.yaml  (extract default)
 //  3. Bare variable:    ${FOO}              -> null (can't know the path, skip)
-// Absolute paths, named volumes, and unresolvable expressions return null so the
-// caller knows to skip creation.
-function resolveHostPathForCreation(hostPath, baseDir) {
+// Absolute paths are returned for validation but are never auto-created by the
+// callers. Named volumes and unresolvable expressions return null.
+function resolveHostPathForCreation(hostPath, baseDir = WORK_DIR) {
   if (typeof hostPath !== 'string' || !hostPath) return null;
-  let effective = hostPath;
-  // Extract default from ${VAR:-default} / ${VAR-default} at any position.
-  const defaultMatch = effective.match(/^\$\{[^:}]+:?-([^}]+)\}(.*)$/);
-  if (defaultMatch) {
-    effective = defaultMatch[1] + defaultMatch[2];
-  } else if (effective.startsWith('${')) {
-    // Bare ${VAR} with no default — cannot predict path.
-    return null;
-  }
+  const effective = effectiveVolumeSource(hostPath, getVolumeInterpolationEnv(baseDir));
+  if (!effective) return null;
   // Now `effective` should be a real path expression.
   if (effective === '.' || effective.startsWith('./') || effective.startsWith('../')) {
     return path.resolve(baseDir, effective);
@@ -261,9 +316,9 @@ function resolveHostPathForCreation(hostPath, baseDir) {
 // / extension hints), pre-create it as directory or empty file.
 //  - Trailing slash or no extension -> directory mount
 //  - Has file extension -> file mount (create parent dir + empty placeholder)
-// The file placeholder matters: without it docker would create a DIRECTORY at
-// that path (matching the container target type is Docker's own guess), which
-// then makes the container fail to read what it expected as a file.
+// Writable file mounts get an empty placeholder so Docker does not create a
+// directory at that path. Read-only config files are validated separately and
+// must already contain real configuration.
 function ensureHostPathExists(fullPath, hostPathHint) {
   const looksLikeDir = hostPathHint.endsWith('/') || !path.extname(fullPath);
   if (looksLikeDir) {
@@ -285,6 +340,82 @@ function ensureHostPathExists(fullPath, hostPathHint) {
   return { created: false, kind: 'file', path: fullPath };
 }
 
+function getReadOnlyFileMountError(serviceName, volumes, baseDir) {
+  if (!Array.isArray(volumes)) return '';
+  for (const volume of volumes) {
+    let source = '';
+    let targetAndMode = '';
+    let readOnly = false;
+
+    if (typeof volume === 'string') {
+      const parsed = splitVolumeEntry(volume);
+      if (!parsed.hasTarget) continue;
+      source = parsed.source;
+      targetAndMode = parsed.targetAndMode;
+      readOnly = isReadOnlyVolumeTarget(targetAndMode);
+    } else if (volume && typeof volume === 'object') {
+      source = volume.source || '';
+      readOnly = volume.read_only === true;
+    }
+    if (!readOnly) continue;
+
+    const effectiveSource = effectiveVolumeSource(source, getVolumeInterpolationEnv(baseDir));
+    const fullPath = resolveHostPathForCreation(source, baseDir);
+    if (!effectiveSource || !fullPath) continue;
+    if (effectiveSource.endsWith('/') || !path.extname(fullPath)) continue;
+
+    let invalidReason = '';
+    try {
+      if (!fs.existsSync(fullPath)) {
+        invalidReason = '文件不存在';
+      } else {
+        const stat = fs.statSync(fullPath);
+        if (!stat.isFile()) invalidReason = '该路径不是普通文件';
+        else if (stat.size === 0) invalidReason = '文件为空';
+      }
+    } catch (error) {
+      invalidReason = `无法读取：${error.message}`;
+    }
+
+    if (invalidReason) {
+      return `只读配置挂载无效：${fullPath}（${invalidReason}）。`
+        + ` 当前服务 ID 为 "${serviceName}"，相对路径会解析到 ${baseDir}；`
+        + '请填写正确的绝对路径，或将有效配置文件放入该服务目录。';
+    }
+  }
+  return '';
+}
+
+function assertServiceMountsReady(serviceName) {
+  const entry = readAllServiceEntries().find(([name]) => name === serviceName);
+  if (!entry) {
+    const error = new Error(`未找到服务 "${serviceName}" 的 compose 配置。`);
+    error.statusCode = 404;
+    throw error;
+  }
+  const service = entry[1];
+  const errorMessage = getReadOnlyFileMountError(
+    serviceName,
+    service.volumes || [],
+    service.__baseDir || WORK_DIR
+  );
+  if (errorMessage) {
+    const error = new Error(errorMessage);
+    error.statusCode = 400;
+    throw error;
+  }
+}
+
+function serviceMountsReadyOrRespond(serviceName, res) {
+  try {
+    assertServiceMountsReady(serviceName);
+    return true;
+  } catch (error) {
+    res.status(error.statusCode || 400).json({ error: error.message });
+    return false;
+  }
+}
+
 // Detect bare named-volume sources (e.g. "grok2api-data" in
 // "grok2api-data:/app/data"). These MUST be declared in the top-level volumes:
 // section or docker compose rejects the project ("refers to undefined volume").
@@ -295,9 +426,9 @@ function extractNamedVolumes(volumes) {
   if (!Array.isArray(volumes)) return names;
   for (const v of volumes) {
     if (typeof v !== 'string') continue;
-    const idx = v.indexOf(':');
-    if (idx <= 0) continue; // anonymous volume or no source
-    const src = v.slice(0, idx);
+    const parsed = splitVolumeEntry(v);
+    if (!parsed.hasTarget || !parsed.source) continue;
+    const src = parsed.source;
     if (/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(src)) names.push(src);
   }
   return names;
@@ -946,6 +1077,7 @@ app.get('/api/services', async (req, res) => {
 app.post('/api/services/:name/start', async (req, res) => {
   const { name } = req.params;
   console.log(`Starting service: ${name}`);
+  if (!serviceMountsReadyOrRespond(name, res)) return;
   if (isMockMode) {
     mockState[name] = { state: 'running', status: 'Up 1 second', health: 'healthy' };
     return res.json({ success: true, message: `Mock started service ${name}` });
@@ -982,6 +1114,7 @@ app.post('/api/services/:name/restart', async (req, res) => {
   const { name } = req.params;
   console.log(`Restarting service: ${name}`);
   if (name === BASE_SERVICE_NAME && !isMockMode) return baseServiceSelfOpGuard(res, '重启');
+  if (!serviceMountsReadyOrRespond(name, res)) return;
   if (isMockMode) {
     mockState[name] = { state: 'running', status: 'Up 1 second', health: 'healthy' };
     return res.json({ success: true, message: `Mock restarted service ${name}` });
@@ -1000,6 +1133,7 @@ app.post('/api/services/:name/recreate', async (req, res) => {
   const { name } = req.params;
   console.log(`Recreating and building service: ${name}`);
   if (name === BASE_SERVICE_NAME && !isMockMode) return baseServiceSelfOpGuard(res, '重建');
+  if (!serviceMountsReadyOrRespond(name, res)) return;
   if (isMockMode) {
     mockState[name] = { state: 'running', status: 'Up 1 second (Rebuilt & Recreated)', health: 'healthy' };
     return res.json({ success: true, message: `Mock rebuilt and recreated service ${name}` });
@@ -1018,6 +1152,7 @@ app.post('/api/services/:name/pull', async (req, res) => {
   const { name } = req.params;
   console.log(`Pulling image and starting service: ${name}`);
   if (name === BASE_SERVICE_NAME && !isMockMode) return baseServiceSelfOpGuard(res, '更新');
+  if (!serviceMountsReadyOrRespond(name, res)) return;
   if (isMockMode) {
     return res.json({ success: true, message: `Mock pulled image for ${name}` });
   }
@@ -1077,6 +1212,7 @@ app.post('/api/services/:name/build-update', async (req, res) => {
   console.log(`Git pull and rebuild service: ${name}`);
 
   if (name === BASE_SERVICE_NAME && !isMockMode) return baseServiceSelfOpGuard(res, '更新');
+  if (!serviceMountsReadyOrRespond(name, res)) return;
 
   if (isMockMode) {
     return res.json({
@@ -1397,10 +1533,24 @@ app.post('/api/services', async (req, res) => {
       if (!fs.existsSync(serviceDir)) {
         fs.mkdirSync(serviceDir, { recursive: true, mode: 0o755 });
       }
-      // include mode: prepend global vars (app vars override on key clash)
+      // Preserve interpolation-only values already present in the service .env
+      // (e.g. GROK2API_CONFIG). They may not appear in service.environment but
+      // Docker Compose still uses them while resolving image/volume expressions.
+      let existingLocalVars = {};
+      const localEnvPath = path.join(serviceDir, '.env');
+      if (fs.existsSync(localEnvPath)) {
+        try {
+          existingLocalVars = dotenv.parse(fs.readFileSync(localEnvPath, 'utf8'));
+        } catch (error) {
+          console.warn(`⚠️  Could not preserve ${name}/.env: ${error.message}`);
+        }
+      }
+
+      // include mode: global defaults, existing interpolation vars, then form
+      // values (the explicit form input wins on key clashes).
       const merged = mode === 'include'
-        ? { ...getGlobalInterpolationVars(), ...fileVars }
-        : fileVars;
+        ? { ...getGlobalInterpolationVars(), ...existingLocalVars, ...fileVars }
+        : { ...existingLocalVars, ...fileVars };
       const envContent = Object.entries(merged)
         .map(([k, v]) => `${k}=${v}`)
         .join('\n') + '\n';
@@ -1426,48 +1576,41 @@ app.post('/api/services', async (req, res) => {
       // it. Physical base differs by mode but the resulting path is the same
       // ($STACK_DIR/<name>/...).
       const physBase = mode === 'include' ? serviceDir : WORK_DIR;
+      const mountError = getReadOnlyFileMountError(name, finalVolumes, physBase);
+      if (mountError) {
+        const error = new Error(mountError);
+        error.statusCode = 400;
+        throw error;
+      }
+
       for (const volumeEntry of finalVolumes) {
-        let hostPath = '';
-        if (typeof volumeEntry === 'string') {
-          const idx = volumeEntry.indexOf(':');
-          if (idx !== -1) hostPath = volumeEntry.slice(0, idx);
+        if (typeof volumeEntry !== 'string') continue;
+        const parsedVolume = splitVolumeEntry(volumeEntry);
+        if (!parsedVolume.hasTarget) continue;
+
+        const effectiveSource = effectiveVolumeSource(
+          parsedVolume.source,
+          getVolumeInterpolationEnv(physBase)
+        );
+        const fullPath = resolveHostPathForCreation(parsedVolume.source, physBase);
+        if (!effectiveSource || !fullPath) continue; // named volume or unresolved ${VAR}
+
+        const isRelativeSource = effectiveSource === '.'
+          || effectiveSource.startsWith('./')
+          || effectiveSource.startsWith('../');
+        const isFileMount = !effectiveSource.endsWith('/') && !!path.extname(fullPath);
+        const isReadOnly = isReadOnlyVolumeTarget(parsedVolume.targetAndMode);
+
+        if (isFileMount && isReadOnly) {
+          continue;
         }
 
-        // Extract the physical path from ${VAR:-default} interpolation so we can
-        // pre-create it. Docker resolves ${VAR:-./default} at runtime; when VAR
-        // is unset it uses the default. If the whole entry is just a bare
-        // ${VAR}, we can't guess the target and skip.
-        let resolvedHost = hostPath;
-        const interpMatch = /^\$\{[^:{}]+:-([^}]+)\}$/.exec(hostPath);
-        if (interpMatch) resolvedHost = interpMatch[1];
-
-        // Only pre-create relative paths (absolute/named volumes are left alone)
-        if (resolvedHost.startsWith('./') || resolvedHost === '.') {
-          const fullPath = path.resolve(physBase, resolvedHost);
-
-          // Treat as file mount only when the path has a file extension AND
-          // doesn't end with '/'. Otherwise create a directory.
-          const isFileMount = !resolvedHost.endsWith('/') && !!path.extname(fullPath);
-
-          if (isFileMount) {
-            // File mount → ensure parent dir exists AND touch the file so
-            // Docker doesn't auto-create a directory of that name at bind time
-            // (which would then make the container see a dir instead of a file).
-            const parentDir = path.dirname(fullPath);
-            if (!fs.existsSync(parentDir)) {
-              console.log(`📁 Creating parent dir: ${path.relative(WORK_DIR, parentDir)}`);
-              fs.mkdirSync(parentDir, { recursive: true, mode: 0o755 });
-            }
-            if (!fs.existsSync(fullPath)) {
-              console.log(`📄 Creating empty mount file: ${path.relative(WORK_DIR, fullPath)}`);
-              fs.writeFileSync(fullPath, '', { encoding: 'utf8', mode: 0o644 });
-            }
-          } else {
-            // Directory mount
-            if (!fs.existsSync(fullPath)) {
-              console.log(`📁 Creating volume directory: ${path.relative(WORK_DIR, fullPath)}`);
-              fs.mkdirSync(fullPath, { recursive: true, mode: 0o755 });
-            }
+        // Relative writable paths belong to this stack and may be created.
+        // Absolute paths are external resources and are never created here.
+        if (isRelativeSource) {
+          const result = ensureHostPathExists(fullPath, effectiveSource);
+          if (result.created) {
+            console.log(`${result.kind === 'file' ? '📄' : '📁'} Created mount ${result.kind}: ${path.relative(WORK_DIR, fullPath)}`);
           }
         }
       }
@@ -1596,7 +1739,7 @@ app.post('/api/services', async (req, res) => {
 
     res.json({ success: true, message: `Successfully saved service "${name}"` });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.status(error.statusCode || 500).json({ error: error.message });
   }
 });
 
@@ -2336,9 +2479,8 @@ ACCOUNT_LOCAL_PATH=data/accounts.db
             : [serviceConfig.env_file];
           for (const ef of envFiles) {
             if (typeof ef !== 'string') continue;
-            const resolved = resolveHostPathForCreation(ef);
-            if (!resolved || !resolved.startsWith('./')) continue;
-            const fullEnv = path.resolve(baseDir, resolved);
+            const fullEnv = resolveHostPathForCreation(ef, baseDir);
+            if (!fullEnv) continue;
             if (!fs.existsSync(fullEnv)) {
               fs.mkdirSync(path.dirname(fullEnv), { recursive: true, mode: 0o755 });
               fs.writeFileSync(fullEnv, '', { encoding: 'utf8', mode: 0o644 });
@@ -2348,59 +2490,42 @@ ACCOUNT_LOCAL_PATH=data/accounts.db
         }
 
         if (!serviceConfig.volumes) continue;
+        const readOnlyMountError = getReadOnlyFileMountError(
+          serviceName,
+          serviceConfig.volumes,
+          baseDir
+        );
+        if (readOnlyMountError) console.warn(`⚠️  ${readOnlyMountError}`);
 
         for (const volumeEntry of serviceConfig.volumes) {
-          let hostPath = '';
-
+          let source = '';
+          let targetAndMode = '';
           if (typeof volumeEntry === 'string') {
-            const parts = volumeEntry.split(':');
-            if (parts.length >= 2) {
-              hostPath = parts[0];
-            }
+            const parsedVolume = splitVolumeEntry(volumeEntry);
+            if (!parsedVolume.hasTarget) continue;
+            source = parsedVolume.source;
+            targetAndMode = parsedVolume.targetAndMode;
           } else if (typeof volumeEntry === 'object' && volumeEntry.source) {
-            hostPath = volumeEntry.source;
+            source = volumeEntry.source;
+            targetAndMode = volumeEntry.read_only ? ':ro' : '';
           }
 
-          // Expand ${VAR:-default} to extract the default path for creation.
-          hostPath = resolveHostPathForCreation(hostPath);
+          const effectiveSource = effectiveVolumeSource(source, getVolumeInterpolationEnv(baseDir));
+          const fullPath = resolveHostPathForCreation(source, baseDir);
+          if (!effectiveSource || !fullPath) continue;
 
-          // Only process relative paths starting with './'
-          if (hostPath.startsWith('./')) {
-            const fullPath = path.resolve(baseDir, hostPath);
+          const isRelativeSource = effectiveSource === '.'
+            || effectiveSource.startsWith('./')
+            || effectiveSource.startsWith('../');
+          if (!isRelativeSource) continue;
 
-            // Determine if it's a file mount or directory mount.
-            const looksLikeFile = !hostPath.endsWith('/') && !!path.extname(fullPath);
-
-            if (looksLikeFile) {
-              // File mount: create parent dir + empty file placeholder.
-              // Without the file, docker will create a directory at that path,
-              // and the container will fail to read config as a file.
-              const parentDir = path.dirname(fullPath);
-              if (!fs.existsSync(parentDir)) {
-                fs.mkdirSync(parentDir, { recursive: true, mode: 0o755 });
-              }
-              if (!fs.existsSync(fullPath)) {
-                fs.writeFileSync(fullPath, '', { encoding: 'utf8', mode: 0o644 });
-                createdDirs.push(path.relative(WORK_DIR, fullPath));
-              }
-              continue;
-            }
-
-            // Directory mount: create the directory itself.
-            let dirToCreate;
-            if (hostPath.endsWith('/') || !path.extname(fullPath)) {
-              // Likely a directory mount (no extension or ends with /)
-              dirToCreate = fullPath;
-            } else {
-              // File mount, create parent directory
-              dirToCreate = path.dirname(fullPath);
-            }
-
-            if (!fs.existsSync(dirToCreate)) {
-              fs.mkdirSync(dirToCreate, { recursive: true, mode: 0o755 });
-              createdDirs.push(path.relative(WORK_DIR, dirToCreate)); // Track created path
-            }
+          const isFileMount = !effectiveSource.endsWith('/') && !!path.extname(fullPath);
+          if (isFileMount && isReadOnlyVolumeTarget(targetAndMode)) {
+            continue;
           }
+
+          const result = ensureHostPathExists(fullPath, effectiveSource);
+          if (result.created) createdDirs.push(path.relative(WORK_DIR, fullPath));
         }
       }
 

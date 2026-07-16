@@ -844,14 +844,25 @@ function addEnvRow(key = '', val = '') {
 }
 
 function splitVolumeMapping(volume) {
-  const lastColonIdx = volume.lastIndexOf(':');
-  if (lastColonIdx === -1) {
-    return { host: volume, container: '' };
+  let interpolationDepth = 0;
+  for (let i = 0; i < volume.length; i += 1) {
+    if (volume[i] === '$' && volume[i + 1] === '{') {
+      interpolationDepth += 1;
+      i += 1;
+      continue;
+    }
+    if (volume[i] === '}' && interpolationDepth > 0) {
+      interpolationDepth -= 1;
+      continue;
+    }
+    if (volume[i] === ':' && interpolationDepth === 0) {
+      return {
+        host: volume.substring(0, i),
+        container: volume.substring(i + 1)
+      };
+    }
   }
-  return {
-    host: volume.substring(0, lastColonIdx),
-    container: volume.substring(lastColonIdx + 1)
-  };
+  return { host: volume, container: '' };
 }
 
 async function applyPastedCompose(composeText) {
@@ -1050,12 +1061,8 @@ function showEditModal(serviceName) {
   volumesList.innerHTML = '';
   if (service.volumes && service.volumes.length > 0) {
     service.volumes.forEach(volStr => {
-      const parts = volStr.split(':');
-      if (parts.length >= 2) {
-        addVolumeRow(parts[0], parts.slice(1).join(':'));
-      } else {
-        addVolumeRow(volStr, '');
-      }
+      const mapping = splitVolumeMapping(volStr);
+      addVolumeRow(mapping.host, mapping.container);
     });
   } else {
     addVolumeRow();
@@ -1463,16 +1470,9 @@ function parseBulkVolumes(text) {
     
     trimmed = trimmed.replace(/^["']|["']$/g, '').trim();
     
-    const lastColonIdx = trimmed.lastIndexOf(':');
-    if (lastColonIdx === -1) {
-      if (trimmed) {
-        result.push({ host: trimmed, container: '' });
-      }
-      return;
-    }
-    
-    const host = trimmed.substring(0, lastColonIdx).trim();
-    const container = trimmed.substring(lastColonIdx + 1).trim();
+    const mapping = splitVolumeMapping(trimmed);
+    const host = mapping.host.trim();
+    const container = mapping.container.trim();
     if (host || container) {
       result.push({ host, container });
     }

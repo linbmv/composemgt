@@ -95,7 +95,11 @@ cd $STACK_DIR/composemgt
 | `./config.yaml` | `./config.yaml` | `$STACK_DIR/<name>/config.yaml` |
 | `/root/data/dl` | `/root/data/dl`（不变） | 绝对路径视为共享/外部挂载 |
 
-对应目录自动创建（目录挂载建目录，文件挂载建父目录），权限 `755`。
+对应目录自动创建（目录挂载建目录，可写文件挂载创建父目录和占位文件），目录权限 `755`、文件权限 `644`。
+
+只读文件挂载（例如 `${GROK2API_CONFIG:-./config.yaml}:/run/grok2api/config.yaml:ro`）不会生成空配置。保存、启动、重启或重建前，面板会检查源文件必须存在、是普通文件且非空；否则直接显示解析后的宿主机绝对路径并阻止操作。
+
+相对路径始终以服务 ID 对应目录为基准。例如服务 ID 为 `g2api` 时，`./config.yaml` 指向 `$STACK_DIR/g2api/config.yaml`，不会指向 `$STACK_DIR/grok2api/config.yaml`。
 
 ### 环境变量
 
@@ -160,6 +164,16 @@ docker compose up -d --force-recreate --remove-orphans <服务名>
 ### 基础服务配置异常
 - `composemgt 不存在` → 检查 include 列表是否含 `composemgt/compose.yml` 且为第一项
 - `必须使用 .254 / 65535` → 检查 `composemgt/compose.yml` 的 IP 与端口
+
+### `missing config` / 只读配置挂载无效
+
+先确认 Docker 最终使用的宿主机源路径：
+
+```bash
+docker inspect <容器名> --format '{{range .Mounts}}{{println .Source "->" .Destination}}{{end}}'
+```
+
+若服务 ID 与现有目录名不同，请把配置复制到 `$STACK_DIR/<服务ID>/`，或在面板中填写现有配置文件的绝对路径。修改 volume 后必须执行“重建”，普通重启不会更新挂载。
 
 ### 「拉取重建」报不是 Git 仓库
 面板从构建上下文（如 `composemgt/manager`）向上查找 `.git`。确保项目是 `git clone` 获得。
