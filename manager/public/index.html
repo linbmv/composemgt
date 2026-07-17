@@ -247,6 +247,26 @@
             </div>
           </div>
 
+          <!-- Container tar Backup / Restore Card -->
+          <div class="col-6 card" style="display: flex; flex-direction: column;">
+            <div class="card-header">
+              <h3>容器整机备份 / 迁移</h3>
+              <span class="text-muted text-sm">用 tar 打包单个容器的目录 + 命名卷，异地可重建</span>
+            </div>
+            <div class="card-body" style="flex-grow: 1; display: flex; flex-direction: column; gap: 16px;">
+              <p class="help-text">在任意容器卡片点「备份」即可下载该容器的 <code>.tar.gz</code>（含它的 <code>compose.yml</code>、<code>.env</code>、绑定挂载数据，以及所有命名卷内容）。把该文件上传到这里即可在本机或另一台部署了 ComposeMgt 的机器上重建该容器。</p>
+              <label class="btn btn-primary" style="text-align: center; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px;">
+                📦 上传备份并恢复容器
+                <input type="file" id="input-restore-container" accept=".tar.gz,.tgz,application/gzip" style="display: none;">
+              </label>
+              <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none;">
+                <input type="checkbox" id="restore-overwrite" style="width: auto; cursor: pointer;">
+                <span class="text-sm">覆盖已有同名容器（谨慎：会覆盖其目录与命名卷内容）</span>
+              </label>
+              <div id="restore-status" class="help-text" style="margin-top: auto;"></div>
+            </div>
+          </div>
+
           <!-- WebDAV Backup Card -->
           <div class="col-6 card">
             <div class="card-header">

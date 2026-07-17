@@ -693,6 +693,9 @@ function renderServices() {
           <button class="btn btn-secondary btn-xs" onclick="triggerAction('${service.name}', 'recreate')" title="${service.deploySource === 'build' ? '使用当前本地源码重新构建镜像并强制重建容器（不拉取新代码）' : '使用当前本地镜像强制重建容器（不拉取新镜像，适用于修改配置后应用变更）'}">
             重建
           </button>
+          <button class="btn btn-secondary btn-xs" onclick="triggerBackup('${service.name}')" title="打包备份：把该容器的目录（compose.yml + .env + 挂载数据）和所有命名卷打成一个 tar.gz 下载，可在任意机器上恢复">
+            备份
+          </button>
           <button class="btn btn-danger btn-xs" onclick="showDeleteModal('${service.name}')" title="从编排中删除此服务">
             &times;
           </button>`
@@ -737,6 +740,19 @@ async function triggerAction(serviceName, action) {
     showAlert(`操作失败: ${err.message}`, 'error');
     actionsContainer.innerHTML = originalHtml;
   }
+}
+
+// Backup a container as a downloadable .tar.gz (its <name>/ tree + named volumes).
+// The download is served with Content-Disposition, so navigating to the URL
+// triggers a browser download without leaving the page.
+function triggerBackup(serviceName) {
+  showAlert(`正在打包容器 ${serviceName}（目录 + 命名卷），大数据卷可能需要一些时间，请稍候...`);
+  const iframe = document.createElement('iframe');
+  iframe.style.display = 'none';
+  iframe.src = `/api/services/${serviceName}/backup`;
+  document.body.appendChild(iframe);
+  // Remove the iframe after a while; the download itself is unaffected.
+  setTimeout(() => { try { document.body.removeChild(iframe); } catch (e) {} }, 120000);
 }
 
 // Logs Console Drawer (SSE real-time streaming)
@@ -1657,6 +1673,41 @@ document.addEventListener('DOMContentLoaded', () => {
         }
       };
       reader.readAsText(file);
+    });
+  }
+
+  const inputRestoreContainer = document.getElementById('input-restore-container');
+  if (inputRestoreContainer) {
+    inputRestoreContainer.addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const statusEl = document.getElementById('restore-status');
+      const overwrite = document.getElementById('restore-overwrite')?.checked ? '1' : '0';
+
+      if (!confirm(`确定用「${file.name}」恢复容器吗？将重建该容器的目录与命名卷${overwrite === '1' ? '（覆盖已有同名容器）' : ''}。`)) {
+        inputRestoreContainer.value = '';
+        return;
+      }
+
+      if (statusEl) statusEl.textContent = '⏳ 正在上传并恢复，请稍候（大数据可能需要几分钟）...';
+      try {
+        const res = await fetch(`/api/services/restore?overwrite=${overwrite}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/gzip' },
+          body: file
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || '恢复失败');
+        if (statusEl) statusEl.textContent = `✅ ${data.message}`;
+        showAlert(`🎉 已恢复容器 "${data.name}"（${(data.volumes || []).length} 个命名卷）`);
+        await loadSystemStatus();
+        loadServices();
+      } catch (err) {
+        if (statusEl) statusEl.textContent = `❌ ${err.message}`;
+        showAlert(`恢复失败: ${err.message}`, 'error');
+      } finally {
+        inputRestoreContainer.value = '';
+      }
     });
   }
 

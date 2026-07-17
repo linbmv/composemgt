@@ -170,6 +170,52 @@ sleep 3
   return { helperId, imageRef, logPath };
 }
 
+// ===================================================================================
+//  Per-container tar backup / restore
+//  A backup is one .tar.gz holding:
+//    manifest.json         — { name, mode, containerName, volumes[], hasTree }
+//    tree.tar              — the container's own $STACK_DIR/<name>/ directory
+//                            (compose.yml + .env + bind-mounted data)   [include mode]
+//    service.yml           — the single service definition               [legacy fallback]
+//    volumes/<real>.tar    — one tar per NAMED docker volume's content
+//  Named volumes live in Docker's volume store (not under <name>/), so they are
+//  captured/restored through short-lived alpine helper containers over the socket.
+// ===================================================================================
+
+const VALID_SERVICE_NAME = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/;
+
+// exec with a long timeout + large buffer, for tar/volume operations that may
+// move gigabytes. cwd/env match runCommand so `docker compose` resolves the stack.
+function runLong(command, timeoutMs = 3600000) {
+  return new Promise((resolve, reject) => {
+    exec(command, { cwd: WORK_DIR, timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024, env: getCommandEnv() },
+      (error, stdout, stderr) => {
+        if (error) {
+          if (error.killed) reject(new Error(`命令超时（${Math.round(timeoutMs / 1000)}s）被终止。\n${stdout}${stderr}`));
+          else reject(new Error(error.message + '\n' + stderr));
+        } else {
+          resolve(stdout + stderr);
+        }
+      });
+  });
+}
+
+// Inspect a container and return its NAMED-volume mounts as [{ name, destination }].
+// bind mounts are excluded (they live under <name>/ and travel with tree.tar).
+async function getServiceNamedVolumeMounts(containerName) {
+  const out = await runCommand(
+    `docker inspect --format '{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}}::{{.Destination}}{{println}}{{end}}{{end}}' ${containerName}`
+  );
+  return out.split('\n')
+    .map(l => l.trim())
+    .filter(Boolean)
+    .map(l => {
+      const i = l.indexOf('::');
+      return { name: l.slice(0, i), destination: l.slice(i + 2) };
+    })
+    .filter(m => m.name && m.destination);
+}
+
 function normalizeEnvironment(environment) {
   if (!environment) return {};
   if (Array.isArray(environment)) {
@@ -1861,6 +1907,169 @@ app.delete('/api/services/:name', async (req, res) => {
     res.json({ success: true, message: `Service "${name}" and its associated variables deleted successfully.` });
   } catch (error) {
     res.status(500).json({ error: error.message });
+  }
+});
+
+// 10b. Backup one container (its <name>/ tree + all named volumes) as one .tar.gz.
+//      The tree (compose.yml + .env + bind data) is read directly off the identity
+//      mount; named volumes live in Docker's store, so a short-lived alpine helper
+//      (socket + volume mounts) packs everything into a single gzip we then stream.
+app.get('/api/services/:name/backup', async (req, res) => {
+  const { name } = req.params;
+  if (!VALID_SERVICE_NAME.test(name)) return res.status(400).json({ error: '非法服务名。' });
+  if (name === BASE_SERVICE_NAME) return res.status(400).json({ error: 'composemgt 是管理面板自身，不支持在线备份（请在主机手动打包）。' });
+  if (isMockMode) return res.status(400).json({ error: '演示模式（未检测到 Docker），无法执行备份。' });
+
+  const mode = getComposeMode();
+  const svc = readAllServicesMap()[name];
+  if (!svc) return res.status(404).json({ error: `服务 "${name}" 不存在。` });
+
+  const containerName = svc.container_name || name;
+  const ts = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14); // YYYYMMDDHHMMSS
+  const stagingRoot = path.join(CONFIG_DIR, '.backup-tmp', `${name}-${ts}-${process.pid}`);
+  const contentDir = path.join(stagingRoot, 'content');
+  const outDir = path.join(stagingRoot, 'out');
+  const cleanup = () => { try { fs.rmSync(stagingRoot, { recursive: true, force: true }); } catch (e) { /* ignore */ } };
+
+  try {
+    fs.mkdirSync(path.join(contentDir, 'volumes'), { recursive: true });
+    fs.mkdirSync(outDir, { recursive: true });
+
+    // Named volumes: prefer the live container's mounts; fall back to compose decl.
+    let volNames = [];
+    try {
+      volNames = (await getServiceNamedVolumeMounts(containerName)).map(m => m.name);
+    } catch (e) { /* container may be stopped/absent */ }
+    if (volNames.length === 0) volNames = extractNamedVolumes(svc.volumes || []);
+    volNames = [...new Set(volNames)].filter(v => VALID_SERVICE_NAME.test(v));
+
+    const treeDir = path.join(WORK_DIR, name);
+    const hasTree = fs.existsSync(treeDir);
+
+    const manifest = {
+      tool: 'composemgt', kind: 'container-backup', version: 1,
+      name, containerName, mode, volumes: volNames, hasTree,
+      createdAt: new Date().toISOString()
+    };
+    fs.writeFileSync(path.join(contentDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
+
+    // Stash the service's own compose file too (helps legacy/standalone recovery).
+    const cfile = serviceComposePath(name);
+    if (fs.existsSync(cfile)) fs.copyFileSync(cfile, path.join(contentDir, 'compose.yml'));
+
+    const volMountArgs = volNames.map(v => `-v ${v}:/vol/${v}:ro`).join(' ');
+    const packScript = [
+      'set -e',
+      hasTree ? `cd /stack && tar -cf /content/tree.tar ${name}` : 'true',
+      'if [ -d /vol ]; then for d in /vol/*; do [ -d "$d" ] || continue; v=$(basename "$d"); tar -cf "/content/volumes/$v.tar" -C "$d" . ; done; fi',
+      'cd /content && tar -czf /out/backup.tar.gz .'
+    ].join(' && ');
+
+    const runCmd = [
+      'docker run --rm',
+      `-v ${WORK_DIR}:/stack:ro`,
+      `-v ${contentDir}:/content`,
+      `-v ${outDir}:/out`,
+      volMountArgs,
+      'alpine sh -c', JSON.stringify(packScript)
+    ].filter(Boolean).join(' ');
+
+    await runLong(runCmd);
+
+    const gzPath = path.join(outDir, 'backup.tar.gz');
+    if (!fs.existsSync(gzPath)) throw new Error('打包失败：未生成备份文件。');
+
+    res.setHeader('Content-Type', 'application/gzip');
+    res.setHeader('Content-Disposition', `attachment; filename="${name}-backup-${ts}.tar.gz"`);
+    const stream = fs.createReadStream(gzPath);
+    stream.on('close', cleanup);
+    stream.on('error', () => { cleanup(); if (!res.headersSent) res.status(500).end(); });
+    stream.pipe(res);
+  } catch (error) {
+    cleanup();
+    if (!res.headersSent) res.status(500).json({ error: `备份失败：${error.message}` });
+  }
+});
+
+// 10c. Restore a container from an uploaded .tar.gz (raw request body).
+//      Recreates <name>/ from tree.tar, recreates + refills each named volume,
+//      and registers the service into the include list. Does NOT auto-start.
+app.post('/api/services/restore', async (req, res) => {
+  if (isMockMode) return res.status(400).json({ error: '演示模式（未检测到 Docker），无法执行恢复。' });
+
+  const stagingRoot = path.join(CONFIG_DIR, '.restore-tmp', `restore-${Date.now()}-${process.pid}`);
+  const uploadPath = path.join(stagingRoot, 'backup.tar.gz');
+  const cleanup = () => { try { fs.rmSync(stagingRoot, { recursive: true, force: true }); } catch (e) { /* ignore */ } };
+
+  try {
+    fs.mkdirSync(stagingRoot, { recursive: true });
+
+    // Stream the raw upload to disk (no multer dependency; express.json ignores
+    // non-JSON content types, so the request stream is untouched here).
+    await new Promise((resolve, reject) => {
+      const ws = fs.createWriteStream(uploadPath);
+      req.on('error', reject);
+      ws.on('error', reject);
+      ws.on('finish', resolve);
+      req.pipe(ws);
+    });
+    if (!fs.existsSync(uploadPath) || fs.statSync(uploadPath).size === 0) {
+      throw new Error('未接收到上传文件。');
+    }
+
+    // Unpack the outer gzip via a helper (don't assume the panel image has tar).
+    await runLong(`docker run --rm -v ${stagingRoot}:/in alpine sh -c ${JSON.stringify('mkdir -p /in/x && tar -xzf /in/backup.tar.gz -C /in/x')}`);
+
+    const manifestPath = path.join(stagingRoot, 'x', 'manifest.json');
+    if (!fs.existsSync(manifestPath)) throw new Error('备份缺少 manifest.json，可能不是本工具导出的容器备份。');
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+
+    const name = manifest.name;
+    if (!name || !VALID_SERVICE_NAME.test(name)) throw new Error('备份 manifest 中的服务名非法。');
+    if (name === BASE_SERVICE_NAME) throw new Error('不能把备份恢复为基础服务 composemgt。');
+
+    const overwrite = String(req.query.overwrite || '') === '1';
+    if (readAllServicesMap()[name] && !overwrite) {
+      throw new Error(`服务 "${name}" 已存在。如需覆盖，请勾选「覆盖已有同名容器」后重试。`);
+    }
+
+    // 1. Restore the container's own directory tree.
+    if (manifest.hasTree && fs.existsSync(path.join(stagingRoot, 'x', 'tree.tar'))) {
+      await runLong(`docker run --rm -v ${WORK_DIR}:/stack -v ${stagingRoot}:/in:ro alpine sh -c ${JSON.stringify('cd /stack && tar -xf /in/x/tree.tar')}`);
+    } else if (fs.existsSync(path.join(stagingRoot, 'x', 'compose.yml'))) {
+      const dest = path.join(WORK_DIR, name);
+      fs.mkdirSync(dest, { recursive: true, mode: 0o755 });
+      fs.copyFileSync(path.join(stagingRoot, 'x', 'compose.yml'), path.join(dest, 'compose.yml'));
+    }
+
+    // 2. Recreate and refill each named volume.
+    const vols = Array.isArray(manifest.volumes) ? manifest.volumes.filter(v => VALID_SERVICE_NAME.test(v)) : [];
+    for (const v of vols) {
+      if (!fs.existsSync(path.join(stagingRoot, 'x', 'volumes', `${v}.tar`))) continue;
+      await runLong(`docker volume create ${v}`);
+      await runLong(`docker run --rm -v ${v}:/v -v ${stagingRoot}:/in:ro alpine sh -c ${JSON.stringify(`cd /v && tar -xf /in/x/volumes/${v}.tar`)}`);
+    }
+
+    // 3. Register into the include list if this is an include-layout stack.
+    if (getComposeMode() === 'include') {
+      const mainDoc = YAML.parseDocument(fs.readFileSync(COMPOSE_FILE_PATH, 'utf8'));
+      const entryPath = `${name}/compose.yml`;
+      const incNode = mainDoc.get('include');
+      const paths = (incNode && incNode.items ? incNode.items : []).map(it => String(it.value ?? it));
+      if (!paths.some(p => p === entryPath || p === './' + entryPath)) {
+        mainDoc.addIn(['include'], entryPath);
+        fs.writeFileSync(COMPOSE_FILE_PATH, mainDoc.toString(), 'utf8');
+      }
+    }
+
+    res.json({
+      success: true, name, volumes: vols,
+      message: `已恢复容器 "${name}"（含 ${vols.length} 个命名卷）。在容器卡片点「启动」，或主机执行： docker compose up -d ${name}`
+    });
+  } catch (error) {
+    if (!res.headersSent) res.status(500).json({ error: `恢复失败：${error.message}` });
+  } finally {
+    cleanup();
   }
 });
 
